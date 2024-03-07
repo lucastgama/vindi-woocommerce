@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Plugin Name: Vindi WooCommerce 2
+ * Plugin Name: Vindi Recorrência WooCommerce
  * Plugin URI: https://github.com/vindi/vindi-woocommerce
  * Description: Adiciona o gateway de pagamento da Vindi para o WooCommerce.
  * Author: Vindi
