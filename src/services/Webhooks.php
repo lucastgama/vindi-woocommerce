@@ -163,9 +163,9 @@ class VindiWebhooks
       return wp_send_json(['message' => 'Não foi possível emitir a fatura'], 422);
 
     } catch (\Exception $e) {
-      $mensagem = 'Ocorreu um erro durante o processamento da fatura. Exception: ' . $e->getMessage();
+      $mensagem = 'Erro durante o processamento da fatura. Exception: ' . $e->getMessage();
       $this->vindi_settings->logger->log(sprintf(__('WEBHOOK ERROR: %s', VINDI), $mensagem));
-      return wp_send_json(['message' => 'Ocorreu um erro durante o processamento da fatura.'], 500);
+      return wp_send_json(['message' => 'Erro durante o processamento da fatura.'], 500);
     }
   }
 
@@ -209,9 +209,9 @@ class VindiWebhooks
       return wp_send_json(['message' => 'Não foi possível processar o pagamento da fatura'], 422);
 
     } catch (\Exception $e) {
-      $mensagem = 'Ocorreu um erro durante o processamento do pagamento da fatura. Exceção:' . $e->getMessage();
+      $mensagem = 'Erro durante o processamento do pagamento da fatura. Exceção:' . $e->getMessage();
       $this->vindi_settings->logger->log(sprintf(__('WEBHOOK ERROR: %s', VINDI), $mensagem));
-      return wp_send_json(['message' => 'Ocorreu um erro durante o processamento do pagamento da fatura.'], 500);
+      return wp_send_json(['message' => 'Erro durante o processamento do pagamento da fatura.'], 500);
     }
   }
 
@@ -235,9 +235,9 @@ class VindiWebhooks
       return wp_send_json(['message' => 'Pagamento cancelado dentro da Vindi!'], 200);
 
     }catch(Exception $e){
-      $mensagem = 'Ocorreu um erro durante o processamento do cancelamento da fatura. Exceção:' . $e->getMessage();
+      $mensagem = 'Erro durante o processamento do cancelamento da fatura. Exceção:' . $e->getMessage();
       $this->vindi_settings->logger->log(sprintf(__('WEBHOOK ERROR: %s', VINDI), $mensagem));
-      return wp_send_json(['message' => 'Ocorreu um erro durante o processamento de cancelamento da fatura.' ], 500);
+      return wp_send_json(['message' => 'Erro durante o processamento de cancelamento da fatura.' ], 500);
     }
   }
 
@@ -305,8 +305,6 @@ class VindiWebhooks
   private function subscription_canceled($data)
   {
     try {
-      $this->vindi_settings->logger->log(sprintf(__('o cancelamento da assinatura foi iniciado.', VINDI)));
-
       $subscription = $this->find_subscription_by_id($data->subscription->code);
 
       if (
@@ -316,30 +314,31 @@ class VindiWebhooks
           || $subscription->has_status('on-hold'))
         || $this->routes->hasPendingSubscriptionBills($data->subscription->id)
       ) {
-        $this->vindi_settings->logger->log(sprintf(__('Cancelamento de assinatura ignorado.', VINDI)));
-        return wp_send_json(['message' => 'Cancelamento de assinatura ignorada.'], 200);
+        $this->vindi_settings->logger->log(sprintf(__('Cancelamento negado.', VINDI)));
+        return wp_send_json(['message' => 'Cancelamento negado.'], 200);
       }
 
       if ($this->vindi_settings->dependencies->is_wc_memberships_active()) {
         $subscription->update_status('pending-cancel');
-        $this->vindi_settings->logger->log(sprintf(__('Status da assinatura atualizado para cancelamento pendente.', VINDI)));
-        return wp_send_json(['message' => 'Status da assinatura atualizado para cancelamento pendente.'], 200);
+        $this->vindi_settings->logger->log(sprintf(__('Assinatura atualizada para cancelamento pendente.', VINDI)));
+        return wp_send_json(['message' => 'Assinatura atualizada para cancelamento pendente.'], 200);
       }
 
       $synchronized_subscription = $this->routes->getSubscription($data->subscription->id);
 
       if ($synchronized_subscription['status'] === 'canceled') {
         $subscription->update_status('cancelled');
-        $this->vindi_settings->logger->log(sprintf(__('Status da assinatura atualizado para cancelado.', VINDI)));
-        return wp_send_json(['message' => 'Status da assinatura atualizado para cancelado.'], 200);
+        $this->vindi_settings->logger->log(sprintf(__('Assinatura cancelado.', VINDI)));
+        return wp_send_json(['message' => 'Assinatura cancelado.'], 200);
       }
 
-      $this->vindi_settings->logger->log(sprintf(__('Cancelamento da assinatura concluído. Cancelamento da assinatura concluído.', VINDI)));
-      return wp_send_json(['message' => 'Cancelamento da assinatura concluído. Cancelamento da assinatura concluído.'], 200);
+      $this->vindi_settings->logger->log(sprintf(__('Ocorreu erro no cancelamento da assinatura', VINDI)));
+      return wp_send_json(['message' => 'Ocorreu erro no cancelamento da assinatura'], 422);
+
     } catch (\Exception $e) {
-      $mensagem = 'Ocorreu um erro durante o processamento do pagamento da fatura. Exceção:' . $e->getMessage();
-      $this->vindi_settings->logger->log(sprintf(__('An error occurred during subscription cancellation.', VINDI), $mensagem));
-      return wp_send_json(['message' => 'An error occurred during subscription cancellation.'], 500);
+      $mensagem = 'Erro durante o processamento do pagamento da fatura. Exceção:' . $e->getMessage();
+      $this->vindi_settings->logger->log(sprintf(__('WEBHOOK ERROR: %s', VINDI), $mensagem));
+      return wp_send_json(['message' => 'Ocorreu erro no cancelamento da assinatura'], 500);
     }
   }
 
@@ -369,11 +368,11 @@ class VindiWebhooks
           return wp_send_json(['message' => 'A assinatura foi reativada com sucesso.'], 200);
         }
       }
-      return wp_send_json(['message' => 'A assinatura não pôde ser reativada.'], 404);
+      return wp_send_json(['message' => 'A assinatura não pôde ser reativada.'], 422);
     } catch (\Exception $e) {
-      $mensagem = 'Ocorreu um erro durante o processamento da reativação da assinatura. Exception: ' . $e->getMessage();
-      $this->vindi_settings->logger->log(sprintf(__('An error occurred during subscription cancellation.', VINDI), $mensagem));
-      return wp_send_json(['message' => 'Ocorreu um erro durante o processamento da reativação da assinatura.'], 500);
+      $mensagem = 'Erro durante o processamento da reativação da assinatura. Exception: ' . $e->getMessage();
+      $this->vindi_settings->logger->log(sprintf(__('WEBHOOK ERROR: %s', VINDI), $mensagem));
+      return wp_send_json(['message' => 'Erro durante o processamento da reativação da assinatura.'], 500);
     }
   }
 
