@@ -302,6 +302,22 @@ class VindiPaymentProcessor
                 $period = get_post_meta($product_id, '_subscription_period', true);
                 $interval = get_post_meta($product_id, '_subscription_period_interval', true);
                 $subscriptions_grouped_by_period[$period . $interval][] = $order_item;
+
+                /* nova implementação teste */
+                $subscription = wc_get_product($product_id);
+                $has_trial = WC_Subscriptions_Product::get_trial_length($subscription) > 0;
+                $has_registration_fee = WC_Subscriptions_Product::get_sign_up_fee($subscription);
+                $has = [];
+                if ($has_trial && $has_registration_fee) {
+                    $has = $this->order_item_has_trial_and_fee($order_item);
+                    $has_fee = $has['taxa_inscricao'];
+                    $only_trial = $has['assinatura'];
+                }
+                if ($has_fee) {
+                    array_push($bill_products, $has);
+                }
+
+                /* termino do teste */
                 array_push($subscription_products, $order_item);
                 continue;
             }
@@ -382,6 +398,18 @@ class VindiPaymentProcessor
 
             throw new Exception($message);
         }
+    }
+
+    private function order_item_has_trial_and_fee($order_item)
+    {
+        $assinatura = array();
+        $assinatura = $order_item;
+        $assinatura['data']['total'] = '0';
+        $assinatura['data']['subtotal'] = '0';
+        return array(
+            'taxa_inscricao' => $order_item,
+            'assinatura' => $assinatura
+        );
     }
 
     private function check_multiple_subscriptions_of_same_period($subscriptions_grouped_by_period)
