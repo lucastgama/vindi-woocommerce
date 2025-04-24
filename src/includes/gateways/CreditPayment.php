@@ -129,6 +129,7 @@ class VindiCreditGateway extends VindiPaymentGateway
             return $this->calculate_order_total($order_id);
         }
         $credit_payment_helpers = new CreditHelpers();
+        error_log(var_export($cart, true));
         return $credit_payment_helpers->get_cart_total($cart);
     }
 

@@ -175,7 +175,7 @@ class VindiWebhooks
                 $order = $this->find_order_by_subscription_and_cycle($vindi_subscription_id, $cycle);
             }
 
-            $vindi_order = get_post_meta($order->id, 'vindi_order', true);
+            $vindi_order = $order->get_meta('vindi_order', true);
             if (!is_array($vindi_order)) {
                 return wp_send_json(['message' => 'Pedido Vindi não encontrado.'], 422);
             }
