@@ -46,7 +46,7 @@ class ProductController
      */
     $this->ignoredTypes = array('variable-subscription', 'subscription');
 
--   add_action('wp_insert_post', array($this, 'create'), 10, 3);
+    add_action('wp_insert_post', array($this, 'create'), 10, 3);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
@@ -202,7 +202,6 @@ class ProductController
         if (!$product) {
           return;
         }
-
         // Check if the post is NOT of the subscription type
         if (in_array($product->get_type(), $this->ignoredTypes)) {
           return;

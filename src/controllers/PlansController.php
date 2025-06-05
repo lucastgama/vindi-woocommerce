@@ -71,8 +71,8 @@ class PlansController
             $product->save();
         }
         if ($post_meta->check_vindi_item_id($post_id, 'vindi_product_id') > 1) {
-          $product->update_meta_data('vindi_product_id', '');
-          $product->save();
+            $product->update_meta_data('vindi_product_id', '');
+            $product->save();
         }
 
     // Check if it's a new post
