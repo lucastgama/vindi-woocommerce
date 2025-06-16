@@ -26,12 +26,12 @@ class PlansController
   /**
    * @var VindiLogger
    */
-    private $logger;
+  private $logger;
 
   /**
    * @var array
    */
-    private $allowedTypes;
+  private $allowedTypes;
 
   function __construct(VindiSettings $vindi_settings)
   {
@@ -56,7 +56,7 @@ class PlansController
   {
     $product = wc_get_product($post_id);
     // Check if the post is product
-    if (!$product ) {
+    if (!$product) {
       return;
     }
     $post_status = $product->get_status();
@@ -65,28 +65,28 @@ class PlansController
       return;
     }
 
-        $post_meta = new PostMeta();
-        if ($post_meta->check_vindi_item_id($post_id, 'vindi_plan_id') > 1) {
-            $product->update_meta_data('vindi_plan_id', '');
-            $product->save();
-        }
-        if ($post_meta->check_vindi_item_id($post_id, 'vindi_product_id') > 1) {
-            $product->update_meta_data('vindi_product_id', '');
-            $product->save();
-        }
+    $post_meta = new PostMeta();
+    if ($post_meta->check_vindi_item_id($post_id, 'vindi_plan_id') > 1) {
+      $product->update_meta_data('vindi_plan_id', '');
+      $product->save();
+    }
+    if ($post_meta->check_vindi_item_id($post_id, 'vindi_product_id') > 1) {
+      $product->update_meta_data('vindi_product_id', '');
+      $product->save();
+    }
 
     // Check if it's a new post
     // The $update value is unreliable because of the auto_draft functionality
-        $vindi_plan_id = $product ? $product->get_meta('vindi_plan_id', true) : '';
+    $vindi_plan_id = $product ? $product->get_meta('vindi_plan_id', true) : '';
 
-        if (!$recreated && $post_status != 'publish' || !empty($vindi_plan_id)) {
-            return $this->update($post_id);
-        }
+    if (!$recreated && $post_status != 'publish' || !empty($vindi_plan_id)) {
+      return $this->update($post_id);
+    }
 
     // Check if the post is of the subscription type
-        if (!in_array($product->get_type(), $this->allowedTypes)) {
-          return;
-        }
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
 
     // Checks if the plan is a variation and creates it
     if ($product->get_type() == 'variable-subscription') {
@@ -101,13 +101,13 @@ class PlansController
         $interval_type     = $variation_product->get_meta('_subscription_period');
         $interval_count    = $variation_product->get_meta('_subscription_period_interval');
         $plan_interval     = VindiConversions::convert_interval($interval_count, $interval_type);
-                $variation_id      = $variation['variation_id'];
+        $variation_id      = $variation['variation_id'];
 
-                $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
+        $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
 
-                if (!$plan_installments || $plan_installments === 0) {
-                    $plan_installments = 1;
-                }
+        if (!$plan_installments || $plan_installments === 0) {
+          $plan_installments = 1;
+        }
 
         $trigger_day = VindiConversions::convertTriggerToDay(
           $product->get_meta('_subscription_trial_length'),
@@ -118,18 +118,18 @@ class PlansController
         $vindi_product_id = $product->get_meta('vindi_product_id', true);
         $createdProduct = !empty($vindi_product_id) ?
           $this->routes->findProductById($vindi_product_id) :
-                      $this->routes->createProduct(
-                      array(
-                          'name' => VINDI_PREFIX_PRODUCT . $data['name'],
-                          'code' => 'WC-' . $data['id'],
-                          'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-                          'invoice' => 'always',
-                          'pricing_schema' => array(
-                          'price' => ($data['price']) ? $data['price'] : 0,
-                          'schema_type' => 'flat',
-                        )
-                      )
-                    );
+          $this->routes->createProduct(
+            array(
+              'name' => VINDI_PREFIX_PRODUCT . $data['name'],
+              'code' => 'WC-' . $data['id'],
+              'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+              'invoice' => 'always',
+              'pricing_schema' => array(
+                'price' => ($data['price']) ? $data['price'] : 0,
+                'schema_type' => 'flat',
+              )
+            )
+          );
 
         // Creates the plan within the Vindi
         $createdPlan = $this->routes->createPlan(array(
@@ -140,7 +140,7 @@ class PlansController
           'billing_trigger_day' => $trigger_day,
           'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
           'code' => 'WC-' . $data['id'],
-                      'installments' => $plan_installments,
+          'installments' => $plan_installments,
           'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
           'plan_items' => array(
             ($product->get_meta('_subscription_length') == 0) ? array(
@@ -155,27 +155,29 @@ class PlansController
         $variations_plans[$variation['variation_id']] = $createdPlan;
 
         // Saving product id and plan in the WC goal
-                      if (isset($variation['variation_id']) && $createdProduct['id']) {
-                            $variation_product = wc_get_product($variation['variation_id']);
-                            $variation_product->update_meta_data('vindi_product_id', $createdProduct['id']);
-                            $variation_product->save();
-                      }
+        if (isset($variation['variation_id']) && $createdProduct['id']) {
+          $variation_product = wc_get_product($variation['variation_id']);
+          $variation_product->update_meta_data('vindi_product_id', $createdProduct['id']);
+          $variation_product->save();
+        }
 
-                        if (isset($variation['variation_id']) && $createdPlan['id']) {
-                            $variation_product = wc_get_product($variation['variation_id']);
-                            $variation_product->update_meta_data('vindi_plan_id', $createdPlan['id']);
-                            $variation_product->save();
-                        }
+        if (isset($variation['variation_id']) && $createdPlan['id']) {
+          $variation_product = wc_get_product($variation['variation_id']);
+          $variation_product->update_meta_data('vindi_plan_id', $createdPlan['id']);
+          $variation_product->save();
+        }
       }
 
-            $product_id = end($variations_products)['id'];
+      $variation_id = array_key_last($variations_products);
 
-            if ($product_id) {
-                $variation_product = wc_get_product($product_id);
-                $variation_product->update_meta_data('vindi_product_id', end($variations_products)['id']);
-                $variation_product->update_meta_data('vindi_plan_id', end($variations_products)['id']);
-                $variation_product->save();
-            }
+      if ($variation_id) {
+        $variation_product = wc_get_product($variation_id);
+        if ($variation_product) {
+          $variation_product->update_meta_data('vindi_product_id', end($variations_products)['id']);
+          $variation_product->update_meta_data('vindi_plan_id', end($variations_plans)['id']);
+          $variation_product->save();
+        }
+      }
 
       return array(
         'product' => $variations_products,
@@ -194,27 +196,27 @@ class PlansController
       $product->get_meta('_subscription_trial_period')
     );
 
-          $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
-          if (!$plan_installments || $plan_installments === 0) {
-              $plan_installments = 1;
-          }
+    $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
+    if (!$plan_installments || $plan_installments === 0) {
+      $plan_installments = 1;
+    }
 
     // Creates the product within the Vindi
     $vindi_product_id = $product ? $product->get_meta('vindi_product_id', true) : '';
     $createdProduct = !empty($vindi_product_id) ?
       $this->routes->findProductById($vindi_product_id) :
-            $this->routes->createProduct(
-              array(
-                'name' => VINDI_PREFIX_PRODUCT . $data['name'],
-                'code' => 'WC-' . $data['id'],
-                'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-                'invoice' => 'always',
-                'pricing_schema' => array(
-                  'price' => ($data['price']) ? $data['price'] : 0,
-                  'schema_type' => 'flat',
-                )
-              )
-            );
+      $this->routes->createProduct(
+        array(
+          'name' => VINDI_PREFIX_PRODUCT . $data['name'],
+          'code' => 'WC-' . $data['id'],
+          'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+          'invoice' => 'always',
+          'pricing_schema' => array(
+            'price' => ($data['price']) ? $data['price'] : 0,
+            'schema_type' => 'flat',
+          )
+        )
+      );
 
     // Creates the plan within the Vindi
     $createdPlan = $this->routes->createPlan(array(
@@ -225,7 +227,7 @@ class PlansController
       'billing_trigger_day' => $trigger_day,
       'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
       'code' => 'WC-' . $data['id'],
-          'installments' => $plan_installments,
+      'installments' => $plan_installments,
       'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
       'plan_items' => array(
         ($product->get_meta('_subscription_length') == 0) ? array(
@@ -239,14 +241,14 @@ class PlansController
 
 
     // Saving product id and plan in the WC goal
-          if ($createdProduct && isset($createdProduct['id'])) {
-              $product->update_meta_data('vindi_product_id', $createdProduct['id']);
-              $product->save();
-          }
-            if ($createdPlan && isset($createdPlan['id'])) {
-              $product->update_meta_data('vindi_plan_id', $createdPlan['id']);
-              $product->save();
-            }
+    if ($createdProduct && isset($createdProduct['id'])) {
+      $product->update_meta_data('vindi_product_id', $createdProduct['id']);
+      $product->save();
+    }
+    if ($createdPlan && isset($createdPlan['id'])) {
+      $product->update_meta_data('vindi_plan_id', $createdPlan['id']);
+      $product->save();
+    }
 
     if ($createdPlan && $createdProduct) {
       set_transient('vindi_product_message', 'created', 60);
@@ -266,9 +268,9 @@ class PlansController
   {
     $product = wc_get_product($post_id);
     // Check if the post is of the signature type
-        if (!in_array($product->get_type(), $this->allowedTypes)) {
-          return;
-        }
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
 
     // Checks whether there is a vindi plan ID created within
     if ($product->get_type() == 'subscription') {
@@ -301,13 +303,13 @@ class PlansController
         $interval_type     = $variation_product->get_meta('_subscription_period');
         $interval_count    = $variation_product->get_meta('_subscription_period_interval');
         $plan_interval     = VindiConversions::convert_interval($interval_count, $interval_type);
-                $variation_id      = $variation['variation_id'];
+        $variation_id      = $variation['variation_id'];
 
-                $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
+        $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
 
-                if (!$plan_installments || $plan_installments === 0) {
-                    $plan_installments = 1;
-                }
+        if (!$plan_installments || $plan_installments === 0) {
+          $plan_installments = 1;
+        }
 
         $trigger_day = VindiConversions::convertTriggerToDay(
           $product->get_meta('_subscription_trial_length'),
@@ -340,7 +342,7 @@ class PlansController
             'billing_trigger_day' => $trigger_day,
             'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
             'code' => 'WC-' . $data['id'],
-                      'installments' => $plan_installments,
+            'installments' => $plan_installments,
             'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
           )
         );
@@ -384,10 +386,10 @@ class PlansController
     );
 
     $vindi_plan_id     = $product->get_meta('vindi_plan_id', true);
-          $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
-          if (!$plan_installments || $plan_installments === 0) {
-              $plan_installments = 1;
-          }
+    $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
+    if (!$plan_installments || $plan_installments === 0) {
+      $plan_installments = 1;
+    }
 
     // Updates the plan within the Vindi
     $updatedPlan = $this->routes->updatePlan(
@@ -400,7 +402,7 @@ class PlansController
         'billing_trigger_day' => $trigger_day,
         'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
         'code' => 'WC-' . $data['id'],
-            'installments' => $plan_installments,
+        'installments' => $plan_installments,
         'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
       )
     );
@@ -433,9 +435,9 @@ class PlansController
     }
 
     // Check if the post is of the signature type
-        if (!in_array($product->get_type(), $this->allowedTypes)) {
-            return;
-        }
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
 
     $vindi_product_id = $product->get_meta('vindi_product_id', true);
     $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
@@ -475,9 +477,9 @@ class PlansController
     }
 
     // Check if the post is of the signature type
-        if (!in_array($product->get_type(), $this->allowedTypes)) {
-            return;
-        }
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
 
     $vindi_product_id = $product->get_meta('vindi_product_id', true);
     $vindi_plan_id = $product->get_meta('vindi_plan_id', true);

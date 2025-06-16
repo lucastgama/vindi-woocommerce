@@ -1,4 +1,5 @@
 <?php
+
 namespace VindiPaymentGateways;
 
 /**
@@ -32,7 +33,6 @@ class ProductsMetabox
     public function woocommerce_subscription_custom_fields()
     {
         global $woocommerce, $post;
-
         $product = wc_get_product($post->ID);
         if (!$product) {
             return;
@@ -65,12 +65,12 @@ class ProductsMetabox
 
     private function show_meta_custom_data($subscription_id)
     {
-        $subscription = wcs_get_subscription($subscription_id);
+        $product = wc_get_product($subscription_id);
         $field_id = "vindi_max_credit_installments_$subscription_id";
-        $value = $subscription ? $subscription->get_meta($field_id, true) : '';
-    
+        $value = $product ? $product->get_meta($field_id, true) : '';
+
         echo '<div class="product_custom_field">';
-    
+
         woocommerce_wp_text_input(
             array(
                 'id'    => $field_id,
@@ -86,7 +86,7 @@ class ProductsMetabox
                 )
             )
         );
-    
+
         echo '</div>';
     }
 
@@ -137,10 +137,9 @@ class ProductsMetabox
     {
         $post_id = $product->get_id();
 
-        $period = $this->get_post_vars('_subscription_period');
-        $interval = $this->get_post_vars('_subscription_period_interval');
+        $period = $product->get_meta('_subscription_period', true);
+        $interval = $product->get_meta('_subscription_period_interval', true);
         $installments = $this->get_post_vars("vindi_max_credit_installments_$post_id");
-
         if ($period && $interval) {
             $this->save_woocommerce_product_custom_fields($post_id, $installments, $period, $interval);
         }
@@ -152,14 +151,13 @@ class ProductsMetabox
         if ($period === 'year' && $installments > 12) {
             $installments = 12;
         }
+        error_log(var_export("interval: $interval, period: $period, installments: $installments", true));
         if ($period === 'month' && $installments > $interval) {
             $installments = $interval;
         }
-
         if (!$installments) {
             $installments = 1;
         }
-
         $product->update_meta_data("vindi_max_credit_installments_$post_id", $installments);
         $product->save();
     }
