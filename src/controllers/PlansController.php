@@ -55,12 +55,10 @@ class PlansController
   function create($post_id, $recreated = false)
   {
     $product = wc_get_product($post_id);
-    // Check if the post is product
     if (!$product) {
       return;
     }
     $post_status = $product->get_status();
-    // Check if the post is a draft
     if (str_contains($post_status, 'draft')) {
       return;
     }
