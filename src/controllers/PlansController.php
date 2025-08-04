@@ -427,6 +427,10 @@ class PlansController
   function trash($post_id)
   {
     $product = wc_get_product($post_id);
+
+    if (!$product) {
+      return;
+    }
     // Check if the post is product
     if ($product->get_type() != 'product') {
       return;
@@ -469,6 +473,10 @@ class PlansController
   function untrash($post_id)
   {
     $product = wc_get_product($post_id);
+
+    if (!$product) {
+      return;
+    }
     // Check if the post is product
     if ($product->get_type() != 'product') {
       return;
