@@ -1,12 +1,12 @@
 <?php
 
 /**
- * Plugin Name: Vindi WooCommerce 2
+ * Plugin Name: Vindi Hub
  * Plugin URI: https://github.com/vindi/vindi-woocommerce
  * Description: Adiciona o gateway de pagamento da Vindi para o WooCommerce.
  * Author: Vindi
  * Author URI: https://www.vindi.com.br
- * Version: 1.4.0
+ * Version: 1.4.1
  * Requires at least: 4.4
  * Tested up to: 6.8
  * Text Domain: vindi-payment-gateway
