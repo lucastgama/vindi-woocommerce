@@ -39,7 +39,8 @@ class PlansController
     $this->logger = $vindi_settings->logger;
     $this->allowedTypes = array('variable-subscription', 'subscription');
 
-    add_action('wp_insert_post', array($this, 'create'), 10, 3);
+    add_action('woocommerce_new_product', array($this, 'create'), 10, 2);
+    add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
@@ -52,38 +53,38 @@ class PlansController
    *
    * @SuppressWarnings(PHPMD.MissingImport)
    */
-  function create($post_id, $recreated = false)
+  function create($product_id, $product = null)
   {
-    $product = wc_get_product($post_id);
+    if (!$product) {
+      $product = wc_get_product($product_id);
+    }
+    
     if (!$product) {
       return;
     }
+    
     $post_status = $product->get_status();
     if (str_contains($post_status, 'draft')) {
       return;
     }
 
-    $post_meta = new PostMeta();
-    if ($post_meta->check_vindi_item_id($post_id, 'vindi_plan_id') > 1) {
-      $product->update_meta_data('vindi_plan_id', '');
-      $product->save();
-    }
-    if ($post_meta->check_vindi_item_id($post_id, 'vindi_product_id') > 1) {
-      $product->update_meta_data('vindi_product_id', '');
-      $product->save();
-    }
-
-    // Check if it's a new post
-    // The $update value is unreliable because of the auto_draft functionality
-    $vindi_plan_id = $product ? $product->get_meta('vindi_plan_id', true) : '';
-
-    if (!$recreated && $post_status != 'publish' || !empty($vindi_plan_id)) {
-      return $this->update($post_id);
-    }
-
-    // Check if the post is of the subscription type
     if (!in_array($product->get_type(), $this->allowedTypes)) {
       return;
+    }
+
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (!empty($vindi_plan_id)) {
+      return;
+    }
+
+    $post_meta = new PostMeta();
+    if ($post_meta->check_vindi_item_id($product_id, 'vindi_plan_id') > 1) {
+      $product->update_meta_data('vindi_plan_id', '');
+      $product->save_meta_data();
+    }
+    if ($post_meta->check_vindi_item_id($product_id, 'vindi_product_id') > 1) {
+      $product->update_meta_data('vindi_product_id', '');
+      $product->save_meta_data();
     }
 
     // Checks if the plan is a variation and creates it
@@ -152,17 +153,16 @@ class PlansController
         $variations_products[$variation['variation_id']] = $createdProduct;
         $variations_plans[$variation['variation_id']] = $createdPlan;
 
-        // Saving product id and plan in the WC goal
         if (isset($variation['variation_id']) && $createdProduct['id']) {
           $variation_product = wc_get_product($variation['variation_id']);
           $variation_product->update_meta_data('vindi_product_id', $createdProduct['id']);
-          $variation_product->save();
+          $variation_product->save_meta_data();
         }
 
         if (isset($variation['variation_id']) && $createdPlan['id']) {
           $variation_product = wc_get_product($variation['variation_id']);
           $variation_product->update_meta_data('vindi_plan_id', $createdPlan['id']);
-          $variation_product->save();
+          $variation_product->save_meta_data();
         }
       }
 
@@ -173,7 +173,7 @@ class PlansController
         if ($variation_product) {
           $variation_product->update_meta_data('vindi_product_id', end($variations_products)['id']);
           $variation_product->update_meta_data('vindi_plan_id', end($variations_plans)['id']);
-          $variation_product->save();
+          $variation_product->save_meta_data();
         }
       }
 
@@ -194,7 +194,7 @@ class PlansController
       $product->get_meta('_subscription_trial_period')
     );
 
-    $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
+    $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
     if (!$plan_installments || $plan_installments === 0) {
       $plan_installments = 1;
     }
@@ -238,14 +238,13 @@ class PlansController
     ));
 
 
-    // Saving product id and plan in the WC goal
     if ($createdProduct && isset($createdProduct['id'])) {
       $product->update_meta_data('vindi_product_id', $createdProduct['id']);
-      $product->save();
+      $product->save_meta_data();
     }
     if ($createdPlan && isset($createdPlan['id'])) {
       $product->update_meta_data('vindi_plan_id', $createdPlan['id']);
-      $product->save();
+      $product->save_meta_data();
     }
 
     if ($createdPlan && $createdProduct) {
@@ -262,19 +261,24 @@ class PlansController
     return $response;
   }
 
-  function update($post_id)
+  function update($product_id, $product = null)
   {
-    $product = wc_get_product($post_id);
-    // Check if the post is of the signature type
+    if (!$product) {
+      $product = wc_get_product($product_id);
+    }
+    
+    if (!$product) {
+      return;
+    }
+
     if (!in_array($product->get_type(), $this->allowedTypes)) {
       return;
     }
 
-    // Checks whether there is a vindi plan ID created within
     if ($product->get_type() == 'subscription') {
       $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
       if (empty($vindi_plan_id)) {
-        return $this->create($post_id, '', '', true);
+        return $this->create($product_id, $product);
       }
     }
 
@@ -292,9 +296,7 @@ class PlansController
         $vindi_product_id = $variation_product->get_meta('vindi_product_id', true);
 
         if (empty($vindi_plan_id)) {
-
-          return $this->create($post_id, '', '', true);
-          break;
+          return $this->create($product_id, $product);
         }
 
         $data = $variation_product->get_data();
@@ -384,7 +386,7 @@ class PlansController
     );
 
     $vindi_plan_id     = $product->get_meta('vindi_plan_id', true);
-    $plan_installments = $product->get_meta("vindi_max_credit_installments_$post_id");
+    $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
     if (!$plan_installments || $plan_installments === 0) {
       $plan_installments = 1;
     }

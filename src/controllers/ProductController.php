@@ -46,7 +46,8 @@ class ProductController
      */
     $this->ignoredTypes = array('variable-subscription', 'subscription');
 
-    add_action('wp_insert_post', array($this, 'create'), 10, 3);
+    add_action('woocommerce_new_product', array($this, 'create'), 10, 2);
+    add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
@@ -59,35 +60,34 @@ class ProductController
    *
    * @SuppressWarnings(PHPMD.MissingImport)
    */
-  function create($post_id, $recreated = false)
+  function create($product_id, $product = null)
   {
-        $product = wc_get_product($post_id);
-        // Check if the post is product
+        if (!$product) {
+          $product = wc_get_product($product_id);
+        }
+        
         if (!$product) {
           return;
         }
+        
         $post_status = $product->get_status();
-        // Check if the post is a draft
         if (str_contains($post_status, 'draft')) {
           return;
         }
-            $post_meta = new PostMeta();
-        if ($post_meta->check_vindi_item_id($post_id, 'vindi_product_id') > 1) {
-            $product->update_meta_data('vindi_product_id', '');
-            $product->save();
-        }
 
-        // Check if it's a new post
-        // The $update value is unreliable because of the auto_draft functionality
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
-        if(!$recreated && $product->get_status() != 'publish' || !empty($vindi_product_id)) {
-          return $this->update($post_id);
-        }
-
-
-        // Check if the post is NOT of the subscription type
         if (in_array($product->get_type(), $this->ignoredTypes)) {
           return;
+        }
+
+        $vindi_product_id = $product->get_meta('vindi_product_id', true);
+        if (!empty($vindi_product_id)) {
+          return;
+        }
+
+        $post_meta = new PostMeta();
+        if ($post_meta->check_vindi_item_id($product_id, 'vindi_product_id') > 1) {
+            $product->update_meta_data('vindi_product_id', '');
+            $product->save_meta_data();
         }
 
         $data = $product->get_data();
@@ -104,10 +104,9 @@ class ProductController
           )
         ));
 
-              // Saving product id and plan in the WC goal
-          if ($createdProduct && isset($createdProduct['id'])) {
+              if ($createdProduct && isset($createdProduct['id'])) {
             $product->update_meta_data('vindi_product_id', $createdProduct['id']);
-            $product->save();
+            $product->save_meta_data();
             set_transient('vindi_product_message', 'created', 60);
           } else {
             set_transient('vindi_product_message', 'error', 60);
@@ -116,20 +115,24 @@ class ProductController
         return $createdProduct;
   }
 
-  function update($post_id)
+  function update($product_id, $product = null)
   {
-        $product = wc_get_product($post_id);
-        // Check if the post is NOT of the subscription type
+        if (!$product) {
+          $product = wc_get_product($product_id);
+        }
+        
+        if (!$product) {
+          return;
+        }
+
         if (in_array($product->get_type(), $this->ignoredTypes)) {
           return;
         }
 
-        // Checks whether there is a vindi product ID associated within
         $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
         if(empty($vindi_product_id)) {
-
-          return $this->create($post_id, '', '', true);
+          return $this->create($product_id, $product);
         }
 
         $data = $product->get_data();
