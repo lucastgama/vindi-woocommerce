@@ -41,18 +41,23 @@ class PlansController
     $this->logger = $vindi_settings->logger;
     $this->allowedTypes = array('variable-subscription', 'subscription');
 
-    add_action('woocommerce_process_product_meta', array($this, 'handle_product_meta_processed'), 25, 1);
-    add_action('woocommerce_variable_product_sync_data', array($this, 'handle_variable_sync'), 30, 2);
-    add_action('vindi_retry_create_plan', array($this, 'create_from_retry'));
-
+    add_action('wp_insert_post', array($this, 'handle_post_insert'), 20, 3);
     add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
 
-  function handle_product_meta_processed($product_id)
+  function handle_post_insert($post_id, $post, $update)
   {
-    $product = wc_get_product($product_id);
+    if ($post->post_type !== 'product') {
+      return;
+    }
+
+    if (str_contains($post->post_status, 'draft')) {
+      return;
+    }
+
+    $product = wc_get_product($post_id);
 
     if (!$product || !in_array($product->get_type(), $this->allowedTypes)) {
       return;
@@ -63,44 +68,7 @@ class PlansController
       return;
     }
 
-    $interval_type = $product->get_meta('_subscription_period');
-
-    if (empty($interval_type)) {
-
-      wp_schedule_single_event(time() + 2, 'vindi_retry_create_plan', array($product_id));
-      return;
-    }
-
-    $this->create($product_id, $product);
-  }
-
-  function handle_variable_sync($product, $children)
-  {
-    if (!in_array($product->get_type(), $this->allowedTypes)) {
-      return;
-    }
-
-    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
-    if (!empty($vindi_plan_id)) {
-      return;
-    }
-    wp_schedule_single_event(time() + 3, 'vindi_retry_create_plan', array($product->get_id()));
-  }
-
-  function create_from_retry($product_id)
-  {
-    $product = wc_get_product($product_id);
-
-    if (!$product) {
-      return;
-    }
-
-    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
-    if (!empty($vindi_plan_id)) {
-      return;
-    }
-
-    $this->create($product_id, $product);
+    $this->create($post_id, $product);
   }
 
   /**
@@ -258,6 +226,11 @@ class PlansController
       $product->get_meta('_subscription_trial_length'),
       $product->get_meta('_subscription_trial_period')
     );
+
+    error_log(var_export(['interval_type' => $interval_type], true));
+    error_log(var_export(['interval_count' => $interval_count], true));
+    error_log(var_export(['plan_interval' => $plan_interval], true));
+
 
     $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
     if (!$plan_installments || $plan_installments === 0) {
