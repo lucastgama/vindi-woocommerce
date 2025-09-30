@@ -2,6 +2,8 @@
 
 namespace VindiPaymentGateways;
 
+use WC_Subscriptions_Product;
+
 /**
  * Creation and edition of products with reflection within Vindi
  *
@@ -39,10 +41,66 @@ class PlansController
     $this->logger = $vindi_settings->logger;
     $this->allowedTypes = array('variable-subscription', 'subscription');
 
-    add_action('woocommerce_new_product', array($this, 'create'), 10, 2);
+    add_action('woocommerce_process_product_meta', array($this, 'handle_product_meta_processed'), 25, 1);
+    add_action('woocommerce_variable_product_sync_data', array($this, 'handle_variable_sync'), 30, 2);
+    add_action('vindi_retry_create_plan', array($this, 'create_from_retry'));
+
     add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
+  }
+
+  function handle_product_meta_processed($product_id)
+  {
+    $product = wc_get_product($product_id);
+
+    if (!$product || !in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
+
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (!empty($vindi_plan_id)) {
+      return;
+    }
+
+    $interval_type = $product->get_meta('_subscription_period');
+
+    if (empty($interval_type)) {
+
+      wp_schedule_single_event(time() + 2, 'vindi_retry_create_plan', array($product_id));
+      return;
+    }
+
+    $this->create($product_id, $product);
+  }
+
+  function handle_variable_sync($product, $children)
+  {
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
+      return;
+    }
+
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (!empty($vindi_plan_id)) {
+      return;
+    }
+    wp_schedule_single_event(time() + 3, 'vindi_retry_create_plan', array($product->get_id()));
+  }
+
+  function create_from_retry($product_id)
+  {
+    $product = wc_get_product($product_id);
+
+    if (!$product) {
+      return;
+    }
+
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (!empty($vindi_plan_id)) {
+      return;
+    }
+
+    $this->create($product_id, $product);
   }
 
   /**
@@ -58,11 +116,11 @@ class PlansController
     if (!$product) {
       $product = wc_get_product($product_id);
     }
-    
+
     if (!$product) {
       return;
     }
-    
+
     $post_status = $product->get_status();
     if (str_contains($post_status, 'draft')) {
       return;
@@ -185,8 +243,15 @@ class PlansController
 
     $data = $product->get_data();
 
-    $interval_type = $product->get_meta('_subscription_period');
-    $interval_count = $product->get_meta('_subscription_period_interval');
+    if (class_exists('WC_Subscriptions_Product')) {
+      $interval_type = WC_Subscriptions_Product::get_period($product);
+      $interval_count = WC_Subscriptions_Product::get_interval($product);
+      $subscription_length = WC_Subscriptions_Product::get_length($product);
+    } else {
+      $interval_type = $product->get_meta('_subscription_period');
+      $interval_count = $product->get_meta('_subscription_period_interval');
+      $subscription_length = $product->get_meta('_subscription_length');
+    }
     $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
 
     $trigger_day = VindiConversions::convertTriggerToDay(
@@ -223,15 +288,15 @@ class PlansController
       'interval_count' => $plan_interval['interval_count'],
       'billing_trigger_type' => 'beginning_of_period',
       'billing_trigger_day' => $trigger_day,
-      'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
+      'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
       'code' => 'WC-' . $data['id'],
       'installments' => $plan_installments,
       'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
       'plan_items' => array(
-        ($product->get_meta('_subscription_length') == 0) ? array(
+        ($subscription_length == 0) ? array(
           'product_id' => $createdProduct['id']
         ) : array(
-          'cycles' => $product->get_meta('_subscription_length'),
+          'cycles' => $subscription_length,
           'product_id' => $createdProduct['id']
         )
       ),
@@ -266,7 +331,7 @@ class PlansController
     if (!$product) {
       $product = wc_get_product($product_id);
     }
-    
+
     if (!$product) {
       return;
     }
