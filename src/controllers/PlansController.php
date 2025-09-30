@@ -227,10 +227,6 @@ class PlansController
       $product->get_meta('_subscription_trial_period')
     );
 
-    error_log(var_export(['interval_type' => $interval_type], true));
-    error_log(var_export(['interval_count' => $interval_count], true));
-    error_log(var_export(['plan_interval' => $plan_interval], true));
-
 
     $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
     if (!$plan_installments || $plan_installments === 0) {
