@@ -109,9 +109,9 @@ class CustomerController
       )
     );
 
-          if (isset($createdUser['id']) && $createdUser['id']) {
-            update_user_meta($user_id, 'vindi_customer_id', $createdUser['id']);
-          }
+    if (isset($createdUser['id']) && $createdUser['id']) {
+      update_user_meta($user_id, 'vindi_customer_id', $createdUser['id']);
+    }
 
     return $createdUser;
   }
@@ -127,7 +127,7 @@ class CustomerController
   function update($user_id, $order = null)
   {
     $vindi_customer_id = get_user_meta($user_id, 'vindi_customer_id', true);
- 
+
     if (!empty($vindi_customer_id)) {
       $vindiUser = $this->routes->findCustomerById($vindi_customer_id);
     }
@@ -168,9 +168,9 @@ class CustomerController
         'phone_type' => 'mobile',
         'number' => preg_replace('/\D+/', '', '55' . $customer->get_meta('billing_cellphone'))
       );
-                if (isset($vindi_phones['mobile'])) {
-                    $mobile['id'] = $vindi_phones['mobile'];
-                }
+      if (isset($vindi_phones['mobile'])) {
+        $mobile['id'] = $vindi_phones['mobile'];
+      }
       $phones[] = $mobile;
     }
     if ($customer->get_billing_phone()) {
@@ -178,9 +178,9 @@ class CustomerController
         'phone_type' => 'landline',
         'number' => preg_replace('/\D+/', '', '55' . $customer->get_billing_phone())
       );
-                if (isset($vindi_phones['landline'])) {
-                    $landline['id'] = $vindi_phones['landline'];
-                }
+      if (isset($vindi_phones['landline'])) {
+        $landline['id'] = $vindi_phones['landline'];
+      }
       $phones[] = $landline;
     }
     $name = (!$user['first_name']) ? $user['display_name'] : $user['first_name'] . ' ' . $user['last_name'];
@@ -198,17 +198,14 @@ class CustomerController
           $metadata['inscricao_estadual'] = $order->get_meta('_billing_ie');
         }
       }
-            if ('2' !== $order->get_meta('_billing_persontype')) {
+      if ('2' !== $order->get_meta('_billing_persontype')) {
         $cpf_or_cnpj = $order->get_meta('_billing_cpf');
-        $this->vindi_settings->logger->log(sprintf('Order cpf -> %s', $cpf_or_cnpj));
-        $this->vindi_settings->logger->log(sprintf('Customer cpf -> %s', $customer->get_meta('billing_cpf')));
         $notes = '';
 
         if ($this->vindi_settings->send_nfe_information()) {
           $metadata['carteira_de_identidade'] = $order->get_meta('_billing_rg');
         }
-        $this->vindi_settings->logger->log(sprintf('Order rg -> %s', $order->get_meta('_billing_rg')));
-            }
+      }
     }
     $updatedUser = $this->routes->updateCustomer(
       $vindi_customer_id,
