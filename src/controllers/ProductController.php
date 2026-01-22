@@ -46,10 +46,37 @@ class ProductController
      */
     $this->ignoredTypes = array('variable-subscription', 'subscription');
 
-    add_action('woocommerce_new_product', array($this, 'create'), 10, 2);
-    add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
+    add_action('save_post_product', array($this, 'handle_product_save'), 10, 3);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
+  }
+
+  /**
+   * Handle product save - decide if create or update
+   */
+  function handle_product_save($post_id, $post, $update)
+  {
+    if ($post->post_type !== 'product') {
+      return;
+    }
+
+    if (str_contains($post->post_status, 'draft')) {
+      return;
+    }
+
+    $product = wc_get_product($post_id);
+    
+    if (!$product || in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
+
+    $vindi_product_id = $product->get_meta('vindi_product_id', true);
+    
+    if (empty($vindi_product_id)) {
+      $this->create($post_id, $product);
+    } else {
+      $this->update($post_id, $product);
+    }
   }
 
   /**
@@ -132,7 +159,7 @@ class ProductController
         $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
         if(empty($vindi_product_id)) {
-          return $this->create($product_id, $product);
+          return;
         }
 
         $data = $product->get_data();

@@ -391,6 +391,25 @@ class VindiRoutes
     return $product;
   }
 
+  public function findPlanByCode($code)
+  {
+    $code = sanitize_text_field($code);
+    $transient_key = "vindi_plan_{$code}";
+    $plan = get_transient($transient_key);
+
+    if(false !== $plan)
+      return $plan;
+
+    $response = $this->api->request(sprintf('plans?query=code:%s', $code), 'GET');
+
+    if (false === empty($response['plans'])) {
+      $plan = end($response['plans']);
+      set_transient($transient_key, $plan, 1 * HOUR_IN_SECONDS);
+    }
+
+    return $plan;
+  }
+
   public function findOrCreateProduct($name, $code)
   {
     $name = substr(sanitize_text_field($name), 0, 250);

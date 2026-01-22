@@ -41,13 +41,12 @@ class PlansController
     $this->logger = $vindi_settings->logger;
     $this->allowedTypes = array('variable-subscription', 'subscription');
 
-    add_action('wp_insert_post', array($this, 'handle_post_insert'), 20, 3);
-    add_action('woocommerce_update_product', array($this, 'update'), 10, 2);
+    add_action('save_post_product', array($this, 'handle_product_save'), 10, 3);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
 
-  function handle_post_insert($post_id, $post, $update)
+  function handle_product_save($post_id, $post, $update)
   {
     if ($post->post_type !== 'product') {
       return;
@@ -63,12 +62,29 @@ class PlansController
       return;
     }
 
-    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
-    if (!empty($vindi_plan_id)) {
+    // For variable subscriptions, check first variation's plan_id
+    if ($product->get_type() == 'variable-subscription') {
+      $variations = $product->get_available_variations();
+      if (!empty($variations)) {
+        $first_variation = wc_get_product($variations[0]['variation_id']);
+        $vindi_plan_id = $first_variation->get_meta('vindi_plan_id', true);
+        
+        if (empty($vindi_plan_id)) {
+          $this->create($post_id, $product);
+        } else {
+          $this->update($post_id, $product);
+        }
+      }
       return;
     }
 
-    $this->create($post_id, $product);
+    // For simple subscriptions
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (empty($vindi_plan_id)) {
+      $this->create($post_id, $product);
+    } else {
+      $this->update($post_id, $product);
+    }
   }
 
   /**
@@ -140,24 +156,48 @@ class PlansController
         );
 
         // Creates the product within the Vindi
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
-        $createdProduct = !empty($vindi_product_id) ?
-          $this->routes->findProductById($vindi_product_id) :
-          $this->routes->createProduct(
-            array(
-              'name' => VINDI_PREFIX_PRODUCT . $data['name'],
-              'code' => 'WC-' . $data['id'],
-              'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-              'invoice' => 'always',
-              'pricing_schema' => array(
-                'price' => ($data['price']) ? $data['price'] : 0,
-                'schema_type' => 'flat',
+        $vindi_product_id = $variation_product->get_meta('vindi_product_id', true);
+        $this->logger->log(sprintf('[PlansController::create] Variação %s - vindi_product_id no WP: %s', $variation_id, $vindi_product_id ?: 'vazio'));
+        
+        if (empty($vindi_product_id)) {
+          // Tenta buscar produto existente por código antes de criar
+          $product_code = 'WC-' . $data['id'];
+          $existing_product = $this->routes->findProductByCode($product_code);
+          
+          if ($existing_product && isset($existing_product['id'])) {
+            $this->logger->log(sprintf('[PlansController::create] Produto já existe na Vindi - ID: %s, Code: %s', $existing_product['id'], $product_code));
+            $createdProduct = $existing_product;
+          } else {
+            $this->logger->log(sprintf('[PlansController::create] Criando novo produto - Code: %s', $product_code));
+            $createdProduct = $this->routes->createProduct(
+              array(
+                'name' => VINDI_PREFIX_PRODUCT . $data['name'],
+                'code' => $product_code,
+                'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+                'invoice' => 'always',
+                'pricing_schema' => array(
+                  'price' => ($data['price']) ? $data['price'] : 0,
+                  'schema_type' => 'flat',
+                )
               )
-            )
-          );
+            );
+          }
+        } else {
+          $this->logger->log(sprintf('[PlansController::create] Usando produto existente do WP - ID: %s', $vindi_product_id));
+          $createdProduct = $this->routes->findProductById($vindi_product_id);
+        }
 
-        // Creates the plan within the Vindi
-        $createdPlan = $this->routes->createPlan(array(
+        // Busca plano existente por código antes de criar
+        $plan_code = 'WC-' . $data['id'];
+        $existing_plan = $this->routes->findPlanByCode($plan_code);
+        
+        if ($existing_plan && isset($existing_plan['id'])) {
+          $this->logger->log(sprintf('[PlansController::create] Plano já existe na Vindi - ID: %s, Code: %s', $existing_plan['id'], $plan_code));
+          $createdPlan = $existing_plan;
+        } else {
+          $this->logger->log(sprintf('[PlansController::create] Criando novo plano - Code: %s', $plan_code));
+          // Creates the plan within the Vindi
+          $createdPlan = $this->routes->createPlan(array(
           'name' => VINDI_PREFIX_PLAN . $data['name'],
           'interval' => $plan_interval['interval'],
           'interval_count' => $plan_interval['interval_count'],
@@ -176,6 +216,8 @@ class PlansController
             )
           ),
         ));
+        }
+        
         $variations_products[$variation['variation_id']] = $createdProduct;
         $variations_plans[$variation['variation_id']] = $createdPlan;
 
@@ -312,7 +354,7 @@ class PlansController
     if ($product->get_type() == 'subscription') {
       $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
       if (empty($vindi_plan_id)) {
-        return $this->create($product_id, $product);
+        return;
       }
     }
 
@@ -330,7 +372,7 @@ class PlansController
         $vindi_product_id = $variation_product->get_meta('vindi_product_id', true);
 
         if (empty($vindi_plan_id)) {
-          return $this->create($product_id, $product);
+          return;
         }
 
         $data = $variation_product->get_data();
