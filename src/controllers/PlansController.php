@@ -157,7 +157,6 @@ class PlansController
 
         // Creates the product within the Vindi
         $vindi_product_id = $variation_product->get_meta('vindi_product_id', true);
-        $this->logger->log(sprintf('[PlansController::create] Variação %s - vindi_product_id no WP: %s', $variation_id, $vindi_product_id ?: 'vazio'));
         
         if (empty($vindi_product_id)) {
           // Tenta buscar produto existente por código antes de criar
@@ -165,10 +164,8 @@ class PlansController
           $existing_product = $this->routes->findProductByCode($product_code);
           
           if ($existing_product && isset($existing_product['id'])) {
-            $this->logger->log(sprintf('[PlansController::create] Produto já existe na Vindi - ID: %s, Code: %s', $existing_product['id'], $product_code));
             $createdProduct = $existing_product;
           } else {
-            $this->logger->log(sprintf('[PlansController::create] Criando novo produto - Code: %s', $product_code));
             $createdProduct = $this->routes->createProduct(
               array(
                 'name' => VINDI_PREFIX_PRODUCT . $data['name'],
@@ -183,7 +180,6 @@ class PlansController
             );
           }
         } else {
-          $this->logger->log(sprintf('[PlansController::create] Usando produto existente do WP - ID: %s', $vindi_product_id));
           $createdProduct = $this->routes->findProductById($vindi_product_id);
         }
 
@@ -192,10 +188,8 @@ class PlansController
         $existing_plan = $this->routes->findPlanByCode($plan_code);
         
         if ($existing_plan && isset($existing_plan['id'])) {
-          $this->logger->log(sprintf('[PlansController::create] Plano já existe na Vindi - ID: %s, Code: %s', $existing_plan['id'], $plan_code));
           $createdPlan = $existing_plan;
         } else {
-          $this->logger->log(sprintf('[PlansController::create] Criando novo plano - Code: %s', $plan_code));
           // Creates the plan within the Vindi
           $createdPlan = $this->routes->createPlan(array(
           'name' => VINDI_PREFIX_PLAN . $data['name'],
