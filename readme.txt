@@ -41,7 +41,7 @@ Para dúvidas e suporte técnico, entre em contato com a equipe Vindi através d
 == Changelog ==
 = 1.4.4 - 22/01/2026 =
 -Lançamento da versão de patch.
-- **Correção:** Webhook de criação de plano e produto corrigido.
+- **Correção:** Falha na criação/atualização de planos e produtos na Vindi ao salvar assinaturas no admin do WooCommerce.
 
 = 1.4.3 - 22/01/2026 =
 -Lançamento da versão de patch.
