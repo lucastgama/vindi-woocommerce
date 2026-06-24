@@ -2,7 +2,8 @@
 
 namespace VindiPaymentGateways;
 
-class VindiConversions {
+class VindiConversions
+{
 
   /**
    * Converts the months, weeks and years of a Trial period into days.
@@ -14,22 +15,21 @@ class VindiConversions {
    *
    * @return number
    */
-  public static function convertTriggerToDay($number, $type = 'month') {
-    $types = array(
-      "day" => 1,
-      "month" => 30,
-      "week" => 7,
-      "year" => 365,
-    );
-
-    $verifyType = $types[$type];
-
-    if(!$verifyType) {
-      return false;
+  public static function convertTriggerToDay($number, $type = 'month')
+  {
+    $length = (int) $number;
+    if ($length <= 0) {
+      return 0;
     }
 
-    return intval($number) * intval($verifyType);
+    $daysMap = [
+      'day'   => 1,
+      'week'  => 7,
+      'month' => 30,
+      'year'  => 365,
+    ];
 
+    return $length * ($daysMap[$type] ?? 1);
   }
   /**
    * Converts the months, weeks and years of a Trial period into days.
@@ -41,33 +41,27 @@ class VindiConversions {
    *
    * @return number
    */
-  public static function convert_interval($interval_count, $interval_type = 'month') {
-    $interval_multiplier = array(
-      "day" => 1,
-      "week" => 7,
-      "month" => 1,
-      "year" => 12,
-    );
-    $interval_types = array(
-      "day" => "days",
-      "week" => "days",
-      "month" => "months",
-      "year" => "months",
-    );
+  public static function convert_interval($interval_count, $interval_type = 'month')
+  {
+    $count = max(1, (int) $interval_count);
 
-    $get_interval_multiplier = $interval_multiplier[$interval_type];
-    $get_type = $interval_types[$interval_type];
+    $map = [
+      'day'   => 'days',
+      'week'  => 'days',
+      'month' => 'months',
+      'year'  => 'months',
+    ];
 
-    if(!$get_type || !$get_interval_multiplier) {
-      return false;
-    }
+    $multiplier = [
+      'day'   => 1,
+      'week'  => 7,
+      'month' => 1,
+      'year'  => 12,
+    ];
 
-    return array(
-      'interval' => $get_type,
-      'interval_count' => intval($interval_count) * intval($get_interval_multiplier)
-    );
-
+    return [
+      'interval'       => $map[$interval_type] ?? 'months',
+      'interval_count' => $count * ($multiplier[$interval_type] ?? 1),
+    ];
   }
 }
-
-?>

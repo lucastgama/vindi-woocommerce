@@ -16,23 +16,23 @@ class ProductController
 
   /**
    * @var array
-  */
-    private $types;
+   */
+  private $types;
 
   /**
    * @var VindiRoutes
-  */
-    private $routes;
+   */
+  private $routes;
 
   /**
    * @var VindiLogger
-  */
-    private $logger;
+   */
+  private $logger;
 
   /**
    * @var array
-  */
-    private $ignoredTypes;
+   */
+  private $ignoredTypes;
 
   function __construct(VindiSettings $vindi_settings)
   {
@@ -46,36 +46,50 @@ class ProductController
      */
     $this->ignoredTypes = array('variable-subscription', 'subscription');
 
-    add_action('save_post_product', array($this, 'handle_product_save'), 10, 3);
+    add_action('woocommerce_new_product', array($this, 'onNewProduct'), 10, 2);
+    add_action('woocommerce_update_product', array($this, 'onUpdateProduct'), 10, 2);
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
 
-  /**
-   * Handle product save - decide if create or update
-   */
-  function handle_product_save($post_id, $post, $update)
+  function onNewProduct($product_id, $product)
   {
-    if ($post->post_type !== 'product') {
+    error_log('onNewProduct called for product ID: ' . $product_id);
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
       return;
     }
 
-    if (str_contains($post->post_status, 'draft')) {
+    if (str_contains($product->get_status(), 'draft')) {
       return;
     }
 
-    $product = wc_get_product($post_id);
-    
-    if (!$product || in_array($product->get_type(), $this->ignoredTypes)) {
+    $this->create($product_id, $product);
+  }
+
+  function onUpdateProduct($product_id, $product)
+  {
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
+
+    if (str_contains($product->get_status(), 'draft')) {
+      return;
+    }
+
+    // Clear WP/WC object caches before reloading to avoid stale meta within the same request.
+    clean_post_cache($product_id);
+    $product = wc_get_product($product_id);
+
+    if (!$product) {
       return;
     }
 
     $vindi_product_id = $product->get_meta('vindi_product_id', true);
-    
+
     if (empty($vindi_product_id)) {
-      $this->create($post_id, $product);
+      $this->create($product_id, $product);
     } else {
-      $this->update($post_id, $product);
+      $this->update($product_id, $product);
     }
   }
 
@@ -89,102 +103,106 @@ class ProductController
    */
   function create($product_id, $product = null)
   {
-        if (!$product) {
-          $product = wc_get_product($product_id);
-        }
-        
-        if (!$product) {
-          return;
-        }
-        
-        $post_status = $product->get_status();
-        if (str_contains($post_status, 'draft')) {
-          return;
-        }
+    error_log('Creating product with ID: ' . $product_id);
+    if (!$product) {
+      $product = wc_get_product($product_id);
+    }
 
-        if (in_array($product->get_type(), $this->ignoredTypes)) {
-          return;
-        }
+    if (!$product) {
+      return;
+    }
 
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
-        if (!empty($vindi_product_id)) {
-          return;
-        }
+    $post_status = $product->get_status();
+    if (str_contains($post_status, 'draft')) {
+      return;
+    }
 
-        $post_meta = new PostMeta();
-        if ($post_meta->check_vindi_item_id($product_id, 'vindi_product_id') > 1) {
-            $product->update_meta_data('vindi_product_id', '');
-            $product->save_meta_data();
-        }
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
 
-        $data = $product->get_data();
+    $vindi_product_id = $product->get_meta('vindi_product_id', true);
+    if (!empty($vindi_product_id)) {
+      return;
+    }
 
-        // Creates the product within the Vindi
-        $createdProduct = $this->routes->createProduct(array(
-          'name' => VINDI_PREFIX_PRODUCT . $data['name'],
-          'code' => 'WC-' . $data['id'],
-          'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-          'invoice' => 'always',
-          'pricing_schema' => array(
-            'price' => ($data['price']) ? $data['price'] : 0,
-            'schema_type' => 'flat',
-          )
-        ));
+    $post_meta = new PostMeta();
+    if ($post_meta->check_vindi_item_id($product_id, 'vindi_product_id') > 1) {
+      $product->update_meta_data('vindi_product_id', '');
+      $product->save_meta_data();
+    }
 
-              if ($createdProduct && isset($createdProduct['id'])) {
-            $product->update_meta_data('vindi_product_id', $createdProduct['id']);
-            $product->save_meta_data();
-            set_transient('vindi_product_message', 'created', 60);
-          } else {
-            set_transient('vindi_product_message', 'error', 60);
-          }
+    $data = $product->get_data();
 
-        return $createdProduct;
+    // Creates the product within the Vindi
+    $createdProduct = $this->routes->createProduct(array(
+      'name' => VINDI_PREFIX_PRODUCT . $data['name'],
+      'code' => 'WC-' . $data['id'],
+      'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+      'invoice' => 'always',
+      'pricing_schema' => array(
+        'price' => ($data['price']) ? $data['price'] : 0,
+        'schema_type' => 'flat',
+      )
+    ));
+
+    if ($createdProduct && isset($createdProduct['id'])) {
+      $product->update_meta_data('vindi_product_id', $createdProduct['id']);
+      $product->save_meta_data();
+      set_transient('vindi_product_message', 'created', 60);
+    } else {
+      error_log('Vindi: falha ao criar produto ' . $product_id . ' - resposta: ' . var_export($createdProduct, true));
+      set_transient('vindi_product_message', 'error', 60);
+    }
+
+    return $createdProduct;
   }
 
   function update($product_id, $product = null)
   {
-        if (!$product) {
-          $product = wc_get_product($product_id);
-        }
-        
-        if (!$product) {
-          return;
-        }
+    error_log('Updating product with ID: ' . $product_id);
+    if (!$product) {
+      $product = wc_get_product($product_id);
+    }
 
-        if (in_array($product->get_type(), $this->ignoredTypes)) {
-          return;
-        }
+    if (!$product) {
+      return;
+    }
 
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
 
-        if(empty($vindi_product_id)) {
-          return;
-        }
+    $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
-        $data = $product->get_data();
-        // Updates the product within the Vindi
-        $updatedProduct = $this->routes->updateProduct(
-          $vindi_product_id,
-          array(
-            'name' => VINDI_PREFIX_PRODUCT . $data['name'],
-            'code' => 'WC-' . $data['id'],
-            'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-            'invoice' => 'always',
-            'pricing_schema' => array(
-              'price' => ($data['price']) ? $data['price'] : 0,
-              'schema_type' => 'flat',
-            )
-          )
-        );
+    if (empty($vindi_product_id)) {
+      return;
+    }
 
-        if($updatedProduct) {
-          set_transient('vindi_product_message', 'updated', 60);
-        } else {
-          set_transient('vindi_product_message', 'error', 60);
-        }
+    $data = $product->get_data();
+    // Updates the product within the Vindi
+    $updatedProduct = $this->routes->updateProduct(
+      $vindi_product_id,
+      array(
+        'name' => VINDI_PREFIX_PRODUCT . $data['name'],
+        'code' => 'WC-' . $data['id'],
+        'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+        'invoice' => 'always',
+        'pricing_schema' => array(
+          'price' => ($data['price']) ? $data['price'] : 0,
+          'schema_type' => 'flat',
+        )
+      )
+    );
 
-        return $updatedProduct;
+    if ($updatedProduct && isset($updatedProduct['id'])) {
+      set_transient('vindi_product_message', 'updated', 60);
+    } else {
+      error_log('Vindi: falha ao atualizar produto ' . $product_id . ' - resposta: ' . var_export($updatedProduct, true));
+      set_transient('vindi_product_message', 'error', 60);
+    }
+
+    return $updatedProduct;
   }
 
   /**
@@ -195,28 +213,28 @@ class ProductController
    */
   function trash($post_id)
   {
-        // Check if the post is product
-        $product = wc_get_product($post_id);
-        if (!$product) {
-          return;
-        }
-        // Check if the post is NOT of the subscription type
-        if (in_array($product->get_type(), $this->ignoredTypes)) {
-          return;
-        }
+    // Check if the post is product
+    $product = wc_get_product($post_id);
+    if (!$product) {
+      return;
+    }
+    // Check if the post is NOT of the subscription type
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
 
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
+    $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
-        if(empty($vindi_product_id)) {
-          return;
-        }
+    if (empty($vindi_product_id)) {
+      return;
+    }
 
-        // Changes the product status within the Vindi
-        $inactivatedProduct = $this->routes->updateProduct($vindi_product_id, array(
-          'status' => 'inactive',
-        ));
+    // Changes the product status within the Vindi
+    $inactivatedProduct = $this->routes->updateProduct($vindi_product_id, array(
+      'status' => 'inactive',
+    ));
 
-        return $inactivatedProduct;
+    return $inactivatedProduct;
   }
 
   /**
@@ -227,26 +245,26 @@ class ProductController
    */
   function untrash($post_id)
   {
-        $product = wc_get_product($post_id);
-        // Check if the post is product
-        if (!$product) {
-          return;
-        }
-        // Check if the post is NOT of the subscription type
-        if (in_array($product->get_type(), $this->ignoredTypes)) {
-          return;
-        }
+    $product = wc_get_product($post_id);
+    // Check if the post is product
+    if (!$product) {
+      return;
+    }
+    // Check if the post is NOT of the subscription type
+    if (in_array($product->get_type(), $this->ignoredTypes)) {
+      return;
+    }
 
-        $vindi_product_id = $product->get_meta('vindi_product_id', true);
-        if(empty($vindi_product_id)) {
-          return;
-        }
+    $vindi_product_id = $product->get_meta('vindi_product_id', true);
+    if (empty($vindi_product_id)) {
+      return;
+    }
 
-        // Changes the product status within the Vindi
-        $activatedProduct = $this->routes->updateProduct($vindi_product_id, array(
-          'status' => 'active',
-        ));
+    // Changes the product status within the Vindi
+    $activatedProduct = $this->routes->updateProduct($vindi_product_id, array(
+      'status' => 'active',
+    ));
 
-        return $activatedProduct;
+    return $activatedProduct;
   }
 }

@@ -33,59 +33,139 @@ class PlansController
   /**
    * @var array
    */
-  private $allowedTypes;
+  private array $allowedTypes = ['variable-subscription', 'subscription'];
 
   function __construct(VindiSettings $vindi_settings)
   {
     $this->routes = $vindi_settings->routes;
     $this->logger = $vindi_settings->logger;
-    $this->allowedTypes = array('variable-subscription', 'subscription');
 
-    add_action('save_post_product', array($this, 'handle_product_save'), 10, 3);
+    add_action('woocommerce_new_product', array($this, 'onNewProduct'), 10, 2);
+    add_action('woocommerce_update_product', array($this, 'onUpdateProduct'), 10, 2);
+
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
   }
 
-  function handle_product_save($post_id, $post, $update)
+  /**
+   * Reads subscription meta from the most reliable source available.
+   *
+   * Priority:
+   *  1. $_POST (admin context) — because woocommerce_update_product fires
+   *     before WCS persists the meta to the database.
+   *  2. WC_Subscriptions_Product static helpers — fall back to internal
+   *     calculations if available.
+   *  3. get_meta() direct read.
+   *
+   * @return array{interval_type:string,interval_count:int,subscription_length:int,trial_length:int,trial_period:string}
+   */
+  private function readSubscriptionMeta($product, $product_id)
   {
-    if ($post->post_type !== 'product') {
+    if (is_admin() && isset($_POST['_subscription_period'])) {
+      return array(
+        'interval_type'       => sanitize_text_field(wp_unslash($_POST['_subscription_period'] ?? 'month')),
+        'interval_count'      => (int) ($_POST['_subscription_period_interval'] ?? 1),
+        'subscription_length' => (int) ($_POST['_subscription_length'] ?? 0),
+        'trial_length'        => (int) ($_POST['_subscription_trial_length'] ?? 0),
+        'trial_period'        => sanitize_text_field(wp_unslash($_POST['_subscription_trial_period'] ?? 'day')),
+      );
+    }
+
+    if (class_exists('\WC_Subscriptions_Product')) {
+      return array(
+        'interval_type'       => (string) \WC_Subscriptions_Product::get_period($product),
+        'interval_count'      => (int) \WC_Subscriptions_Product::get_interval($product),
+        'subscription_length' => (int) \WC_Subscriptions_Product::get_length($product),
+        'trial_length'        => (int) \WC_Subscriptions_Product::get_trial_length($product),
+        'trial_period'        => (string) \WC_Subscriptions_Product::get_trial_period($product),
+      );
+    }
+
+    return array(
+      'interval_type'       => (string) ($product->get_meta('_subscription_period') ?: 'month'),
+      'interval_count'      => (int) ($product->get_meta('_subscription_period_interval') ?: 1),
+      'subscription_length' => (int) $product->get_meta('_subscription_length'),
+      'trial_length'        => (int) $product->get_meta('_subscription_trial_length'),
+      'trial_period'        => (string) ($product->get_meta('_subscription_trial_period') ?: 'day'),
+    );
+  }
+
+  function onNewProduct($product_id, $product)
+  {
+
+    error_log('onNewProduct called for product ID: ' . $product_id);
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
       return;
     }
 
-    if (str_contains($post->post_status, 'draft')) {
+    if (str_contains($product->get_status(), 'draft')) {
       return;
     }
 
-    $product = wc_get_product($post_id);
+    $this->handlePlan($product_id, $product);
+  }
 
-    if (!$product || !in_array($product->get_type(), $this->allowedTypes)) {
+  function onUpdateProduct($product_id, $product)
+  {
+    error_log('onUpdateProduct called for product ID: ' . $product_id);
+    if (!in_array($product->get_type(), $this->allowedTypes)) {
       return;
     }
 
-    // For variable subscriptions, check first variation's plan_id
-    if ($product->get_type() == 'variable-subscription') {
+    if (str_contains($product->get_status(), 'draft')) {
+      return;
+    }
+
+    $this->handlePlan($product_id, $product);
+  }
+
+  private function handlePlan($product_id, $product)
+  {
+    error_log('Handling plan for product ID: ' . $product_id);
+    // Variable Subscription
+    if ($product->get_type() === 'variable-subscription') {
+
       $variations = $product->get_available_variations();
-      if (!empty($variations)) {
-        $first_variation = wc_get_product($variations[0]['variation_id']);
-        $vindi_plan_id = $first_variation->get_meta('vindi_plan_id', true);
-        
-        if (empty($vindi_plan_id)) {
-          $this->create($post_id, $product);
-        } else {
-          $this->update($post_id, $product);
-        }
+
+      if (empty($variations)) {
+        return;
       }
+
+      $first_variation = wc_get_product(
+        $variations[0]['variation_id']
+      );
+
+      if (!$first_variation) {
+        return;
+      }
+
+      $vindi_plan_id = $first_variation->get_meta(
+        'vindi_plan_id',
+        true
+      );
+
+      if (empty($vindi_plan_id)) {
+        $this->create($product_id, $product);
+      } else {
+        $this->update($product_id, $product);
+      }
+
       return;
     }
 
-    // For simple subscriptions
-    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    // Simple Subscription
+    $vindi_plan_id = $product->get_meta(
+      'vindi_plan_id',
+      true
+    );
+
     if (empty($vindi_plan_id)) {
-      $this->create($post_id, $product);
+      $this->create($product_id, $product);
     } else {
-      $this->update($post_id, $product);
+      $this->update($product_id, $product);
     }
   }
+
 
   /**
    * When the user creates a subscription in Woocomerce, it is created in the Vindi.
@@ -97,6 +177,9 @@ class PlansController
    */
   function create($product_id, $product = null)
   {
+    $data = $product->get_data();
+    error_log('DATA ----: ' . print_r($data, true));
+
     if (!$product) {
       $product = wc_get_product($product_id);
     }
@@ -139,9 +222,24 @@ class PlansController
 
         $data = $variation_product->get_data();
 
-        $interval_type     = $variation_product->get_meta('_subscription_period');
-        $interval_count    = $variation_product->get_meta('_subscription_period_interval');
-        $plan_interval     = VindiConversions::convert_interval($interval_count, $interval_type);
+        $meta = $this->readSubscriptionMeta($variation_product, $variation['variation_id']);
+        $interval_type       = $meta['interval_type'];
+        $interval_count      = $meta['interval_count'];
+        $subscription_length = $meta['subscription_length'];
+        $trial_length        = $meta['trial_length'];
+        $trial_period        = $meta['trial_period'];
+
+        $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+        if (!is_array($plan_interval)) {
+          error_log('Vindi: intervalo inválido para variation ' . $variation['variation_id']);
+          continue;
+        }
+
+        $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
+        if ($trigger_day === false) {
+          $trigger_day = 0;
+        }
+
         $variation_id      = $variation['variation_id'];
 
         $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
@@ -150,19 +248,14 @@ class PlansController
           $plan_installments = 1;
         }
 
-        $trigger_day = VindiConversions::convertTriggerToDay(
-          $product->get_meta('_subscription_trial_length'),
-          $product->get_meta('_subscription_trial_period')
-        );
-
         // Creates the product within the Vindi
         $vindi_product_id = $variation_product->get_meta('vindi_product_id', true);
-        
+
         if (empty($vindi_product_id)) {
           // Tenta buscar produto existente por código antes de criar
           $product_code = 'WC-' . $data['id'];
           $existing_product = $this->routes->findProductByCode($product_code);
-          
+
           if ($existing_product && isset($existing_product['id'])) {
             $createdProduct = $existing_product;
           } else {
@@ -186,32 +279,83 @@ class PlansController
         // Busca plano existente por código antes de criar
         $plan_code = 'WC-' . $data['id'];
         $existing_plan = $this->routes->findPlanByCode($plan_code);
-        
+        error_log('=== VINDI CREATE SIMPLE PLAN ===');
+        error_log('product_id=' . $product_id);
+
+        error_log(
+          '_subscription_period=' .
+            var_export($interval_type, true)
+        );
+
+        error_log(
+          '_subscription_period_interval=' .
+            var_export($interval_count, true)
+        );
+
+        error_log(
+          'plan_installments=' .
+            var_export($plan_installments, true)
+        );
+
+        error_log(
+          '_subscription_trial_length=' .
+            var_export(
+              $product->get_meta('_subscription_trial_length'),
+              true
+            )
+        );
+
+        error_log(
+          '_subscription_trial_period=' .
+            var_export(
+              $product->get_meta('_subscription_trial_period'),
+              true
+            )
+        );
+        error_log(
+          'POST subscription_period=' .
+            var_export($_POST['_subscription_period'] ?? null, true)
+        );
+
+        error_log(
+          'POST subscription_length=' .
+            var_export($_POST['_subscription_length'] ?? null, true)
+        );
+
+        error_log(
+          'POST subscription_trial_length=' .
+            var_export($_POST['_subscription_trial_length'] ?? null, true)
+        );
+
+        error_log(
+          'POST subscription_trial_period=' .
+            var_export($_POST['_subscription_trial_period'] ?? null, true)
+        );
         if ($existing_plan && isset($existing_plan['id'])) {
           $createdPlan = $existing_plan;
         } else {
           // Creates the plan within the Vindi
           $createdPlan = $this->routes->createPlan(array(
-          'name' => VINDI_PREFIX_PLAN . $data['name'],
-          'interval' => $plan_interval['interval'],
-          'interval_count' => $plan_interval['interval_count'],
-          'billing_trigger_type' => 'beginning_of_period',
-          'billing_trigger_day' => $trigger_day,
-          'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
-          'code' => 'WC-' . $data['id'],
-          'installments' => $plan_installments,
-          'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
-          'plan_items' => array(
-            ($product->get_meta('_subscription_length') == 0) ? array(
-              'product_id' => $createdProduct['id']
-            ) : array(
-              'cycles' => $product->get_meta('_subscription_length'),
-              'product_id' => $createdProduct['id']
-            )
-          ),
-        ));
+            'name' => VINDI_PREFIX_PLAN . $data['name'],
+            'interval' => $plan_interval['interval'],
+            'interval_count' => $plan_interval['interval_count'],
+            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_day' => $trigger_day,
+            'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
+            'code' => 'WC-' . $data['id'],
+            'installments' => $plan_installments,
+            'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
+            'plan_items' => array(
+              ($subscription_length == 0) ? array(
+                'product_id' => $createdProduct['id']
+              ) : array(
+                'cycles' => $subscription_length,
+                'product_id' => $createdProduct['id']
+              )
+            ),
+          ));
         }
-        
+
         $variations_products[$variation['variation_id']] = $createdProduct;
         $variations_plans[$variation['variation_id']] = $createdPlan;
 
@@ -247,21 +391,24 @@ class PlansController
 
     $data = $product->get_data();
 
-    if (class_exists('WC_Subscriptions_Product')) {
-      $interval_type = WC_Subscriptions_Product::get_period($product);
-      $interval_count = WC_Subscriptions_Product::get_interval($product);
-      $subscription_length = WC_Subscriptions_Product::get_length($product);
-    } else {
-      $interval_type = $product->get_meta('_subscription_period');
-      $interval_count = $product->get_meta('_subscription_period_interval');
-      $subscription_length = $product->get_meta('_subscription_length');
-    }
-    $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+    $meta = $this->readSubscriptionMeta($product, $product_id);
+    $interval_type       = $meta['interval_type'];
+    $interval_count      = $meta['interval_count'];
+    $subscription_length = $meta['subscription_length'];
+    $trial_length        = $meta['trial_length'];
+    $trial_period        = $meta['trial_period'];
 
-    $trigger_day = VindiConversions::convertTriggerToDay(
-      $product->get_meta('_subscription_trial_length'),
-      $product->get_meta('_subscription_trial_period')
-    );
+    $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+    if (!is_array($plan_interval)) {
+      error_log('Vindi: intervalo inválido para o produto ' . $product_id);
+      set_transient('vindi_product_message', 'error', 60);
+      return;
+    }
+
+    $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
+    if ($trigger_day === false) {
+      $trigger_day = 0;
+    }
 
 
     $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
@@ -285,7 +432,63 @@ class PlansController
           )
         )
       );
+    error_log('=== VINDI CREATE SIMPLE PLAN ===');
+    error_log('product_id=' . $product_id);
 
+    error_log(
+      '_subscription_length=' .
+        var_export($subscription_length, true)
+    );
+
+    error_log(
+      '_subscription_period=' .
+        var_export($interval_type, true)
+    );
+
+    error_log(
+      '_subscription_period_interval=' .
+        var_export($interval_count, true)
+    );
+
+    error_log(
+      'plan_installments=' .
+        var_export($plan_installments, true)
+    );
+
+    error_log(
+      '_subscription_trial_length=' .
+        var_export(
+          $product->get_meta('_subscription_trial_length'),
+          true
+        )
+    );
+
+    error_log(
+      '_subscription_trial_period=' .
+        var_export(
+          $product->get_meta('_subscription_trial_period'),
+          true
+        )
+    );
+    error_log(
+      'POST subscription_period=' .
+        var_export($_POST['_subscription_period'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_length=' .
+        var_export($_POST['_subscription_length'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_trial_length=' .
+        var_export($_POST['_subscription_trial_length'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_trial_period=' .
+        var_export($_POST['_subscription_trial_period'] ?? null, true)
+    );
     // Creates the plan within the Vindi
     $createdPlan = $this->routes->createPlan(array(
       'name' => VINDI_PREFIX_PLAN . $data['name'],
@@ -370,9 +573,24 @@ class PlansController
         }
 
         $data = $variation_product->get_data();
-        $interval_type     = $variation_product->get_meta('_subscription_period');
-        $interval_count    = $variation_product->get_meta('_subscription_period_interval');
-        $plan_interval     = VindiConversions::convert_interval($interval_count, $interval_type);
+        $meta = $this->readSubscriptionMeta($variation_product, $variation['variation_id']);
+        $interval_type       = $meta['interval_type'];
+        $interval_count      = $meta['interval_count'];
+        $subscription_length = $meta['subscription_length'];
+        $trial_length        = $meta['trial_length'];
+        $trial_period        = $meta['trial_period'];
+
+        $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+        if (!is_array($plan_interval)) {
+          error_log('Vindi: intervalo inválido para variation ' . $variation['variation_id']);
+          continue;
+        }
+
+        $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
+        if ($trigger_day === false) {
+          $trigger_day = 0;
+        }
+
         $variation_id      = $variation['variation_id'];
 
         $plan_installments = $variation_product->get_meta("vindi_max_credit_installments_$variation_id");
@@ -380,11 +598,6 @@ class PlansController
         if (!$plan_installments || $plan_installments === 0) {
           $plan_installments = 1;
         }
-
-        $trigger_day = VindiConversions::convertTriggerToDay(
-          $product->get_meta('_subscription_trial_length'),
-          $product->get_meta('_subscription_trial_period')
-        );
 
         // Updates the product within the Vindi
         $updatedProduct = $this->routes->updateProduct(
@@ -410,7 +623,7 @@ class PlansController
             'interval_count' => $plan_interval['interval_count'],
             'billing_trigger_type' => 'beginning_of_period',
             'billing_trigger_day' => $trigger_day,
-            'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
+            'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
             'code' => 'WC-' . $data['id'],
             'installments' => $plan_installments,
             'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
@@ -429,14 +642,24 @@ class PlansController
 
     $data = $product->get_data();
 
-    $interval_type = $product->get_meta('_subscription_period');
-    $interval_count = $product->get_meta('_subscription_period_interval');
-    $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+    $meta = $this->readSubscriptionMeta($product, $product_id);
+    $interval_type       = $meta['interval_type'];
+    $interval_count      = $meta['interval_count'];
+    $subscription_length = $meta['subscription_length'];
+    $trial_length        = $meta['trial_length'];
+    $trial_period        = $meta['trial_period'];
 
-    $trigger_day = VindiConversions::convertTriggerToDay(
-      $product->get_meta('_subscription_trial_length'),
-      $product->get_meta('_subscription_trial_period')
-    );
+    $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
+    if (!is_array($plan_interval)) {
+      error_log('Vindi: intervalo inválido no update do produto ' . $product_id);
+      set_transient('vindi_product_message', 'error', 60);
+      return;
+    }
+
+    $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
+    if ($trigger_day === false) {
+      $trigger_day = 0;
+    }
 
     $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
@@ -470,7 +693,7 @@ class PlansController
         'interval_count' => $plan_interval['interval_count'],
         'billing_trigger_type' => 'beginning_of_period',
         'billing_trigger_day' => $trigger_day,
-        'billing_cycles' => ($product->get_meta('_subscription_length') == 0) ? null : $product->get_meta('_subscription_length'),
+        'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
         'code' => 'WC-' . $data['id'],
         'installments' => $plan_installments,
         'status' => ($data['status'] == 'publish') ? 'active' : 'inactive',
