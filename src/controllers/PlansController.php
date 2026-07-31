@@ -45,6 +45,45 @@ class PlansController
 
     add_action('wp_trash_post', array($this, 'trash'), 10, 1);
     add_action('untrash_post', array($this, 'untrash'), 10, 1);
+    add_action('updated_post_meta', array($this, 'onTrialMetaChanged'), 10, 4);
+    add_action('added_post_meta', array($this, 'onTrialMetaChanged'), 10, 4);
+  }
+
+  /**
+   * Re-sync the Vindi plan whenever a trial field changes on a
+   * subscription (or a subscription variation) that already has a
+   * `vindi_plan_id` mapped to it.
+   *
+   * @param int    $meta_id    Unused. Native WP meta id.
+   * @param int    $object_id  Post id of the product/variation being updated.
+   * @param string $meta_key   Meta key being persisted.
+   * @param mixed  $meta_value New value being stored.
+   */
+  public function onTrialMetaChanged($meta_id, $object_id, $meta_key, $meta_value)
+  {
+    $tracked = array(
+      '_subscription_trial_length',
+      '_subscription_trial_period',
+      '_subscription_period',
+      '_subscription_period_interval',
+      '_subscription_length',
+    );
+
+    if (!in_array($meta_key, $tracked, true)) {
+      return;
+    }
+
+    $product = wc_get_product($object_id);
+    if (!$product || !in_array($product->get_type(), $this->allowedTypes, true)) {
+      return;
+    }
+
+    $vindi_plan_id = $product->get_meta('vindi_plan_id', true);
+    if (empty($vindi_plan_id)) {
+      return;
+    }
+
+    $this->update($object_id, $product);
   }
 
   /**
@@ -88,6 +127,29 @@ class PlansController
       'trial_length'        => (int) $product->get_meta('_subscription_trial_length'),
       'trial_period'        => (string) ($product->get_meta('_subscription_trial_period') ?: 'day'),
     );
+  }
+
+  /**
+   * Pick the Vindi `billing_trigger_type` that honours the WooCommerce
+   * subscription trial configuration.
+   *
+   * Vindi ignores `billing_trigger_day` when `billing_trigger_type` is
+   * `beginning_of_period`, so the trial of N days/months gets converted
+   * into a same-day charge instead of a deferred first bill. That is why
+   * a "1º mês por R$ 9,90" promotion was being invoiced in full on the
+   * day of purchase.
+   *
+   * Returning `end_of_period` when a trial exists makes Vindi hold the
+   * first charge for `billing_trigger_day` and aligns the plugin's
+   * behaviour with the customer's expectation of a free trial window.
+   *
+   * @param int $trial_length WooCommerce `_subscription_trial_length`.
+   *
+   * @return string Either "end_of_period" (trial) or "beginning_of_period".
+   */
+  private function resolve_billing_trigger_type($trial_length)
+  {
+    return ((int) $trial_length) > 0 ? 'end_of_period' : 'beginning_of_period';
   }
 
   function onNewProduct($product_id, $product)
@@ -282,7 +344,7 @@ class PlansController
             'name' => VINDI_PREFIX_PLAN . $data['name'],
             'interval' => $plan_interval['interval'],
             'interval_count' => $plan_interval['interval_count'],
-            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
             'billing_trigger_day' => $trigger_day,
             'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
             'code' => 'WC-' . $data['id'],
@@ -380,7 +442,7 @@ class PlansController
       'name' => VINDI_PREFIX_PLAN . $data['name'],
       'interval' => $plan_interval['interval'],
       'interval_count' => $plan_interval['interval_count'],
-      'billing_trigger_type' => 'beginning_of_period',
+      'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
       'billing_trigger_day' => $trigger_day,
       'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
       'code' => 'WC-' . $data['id'],
@@ -506,7 +568,7 @@ class PlansController
             'name' => VINDI_PREFIX_PLAN . $data['name'],
             'interval' => $plan_interval['interval'],
             'interval_count' => $plan_interval['interval_count'],
-            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
             'billing_trigger_day' => $trigger_day,
             'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
             'code' => 'WC-' . $data['id'],
@@ -575,7 +637,7 @@ class PlansController
         'name' => VINDI_PREFIX_PLAN . $data['name'],
         'interval' => $plan_interval['interval'],
         'interval_count' => $plan_interval['interval_count'],
-        'billing_trigger_type' => 'beginning_of_period',
+        'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
         'billing_trigger_day' => $trigger_day,
         'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
         'code' => 'WC-' . $data['id'],

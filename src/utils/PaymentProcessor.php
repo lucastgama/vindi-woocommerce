@@ -63,6 +63,14 @@ class VindiPaymentProcessor
     private $single_freight;
 
     /**
+     * Cache the Vindi product id for the generic "fee" item to avoid repeated lookups
+     * within the same request.
+     *
+     * @var int|null
+     */
+    private $fees_added = null;
+
+    /**
      * Payment Processor contructor.
      *
      * @param WC_Order $order The order to be processed
@@ -452,6 +460,7 @@ class VindiPaymentProcessor
         }
 
         $this->order->update_meta_data('vindi_order', $order_post_meta);
+        $this->persist_credit_card_brand_meta($order_post_meta);
         $this->order->save();
         WC()->session->__unset('current_payment_profile');
         WC()->session->__unset('current_customer');
@@ -659,6 +668,7 @@ class VindiPaymentProcessor
         $order_items[] = $this->build_shipping_item($order_items);
         $order_items[] = $this->build_tax_item($order_items);
         $order_items[] = $this->build_sign_up_fee_item($order_items);
+        $order_items[] = $this->build_fee_item($order_items);
 
         if ('bill' === $order_type) {
             $order_items[] = $this->build_discount_item_for_bill($order_items);
@@ -671,15 +681,62 @@ class VindiPaymentProcessor
     protected function build_items($order_items, $call_build_items)
     {
         $product_items = [];
+        $suf_discount = 0.0;
+        foreach ($order_items as $idx => $candidate) {
+            if (isset($candidate['type']) && 'sign_up_fee_discount' === $candidate['type']) {
+                $suf_discount = (float) ($candidate['discount_on_first_cycle'] ?? $candidate['price'] ?? 0);
+                unset($order_items[$idx]);
+                break;
+            }
+        }
 
-        foreach ($order_items as $order_item) {
+        foreach (array_values($order_items) as $order_item) {
             if (!empty($order_item)) {
                 $newProduct = $this->$call_build_items($order_item);
+                if ($suf_discount > 0 && $this->is_recurring_plan_item($newProduct)) {
+                    $existing = isset($newProduct['discounts']) && is_array($newProduct['discounts'])
+                        ? $newProduct['discounts']
+                        : array();
+                    $existing[] = array(
+                        'discount_type' => 'amount',
+                        'amount'        => $suf_discount,
+                        'cycles'        => 1,
+                    );
+                    $newProduct['discounts'] = $existing;
+                    $suf_discount = 0;
+                }
                 $product_items[] = $newProduct;
             }
         }
 
         return $product_items;
+    }
+
+    /**
+     * Decide whether a built Vindi product_item is the recurring plan
+     * item (i.e. the one a one-cycle sign-up fee discount should attach
+     * to). It is the one carrying a real product_id and the
+     * `pricing_schema.schema_type = per_unit` marker; tax, shipping,
+     * interest, discount, fee, sign_up_fee and the SUF descriptor are
+     * excluded.
+     *
+     * @param array $item The candidate item to test.
+     *
+     * @return bool
+     */
+    protected function is_recurring_plan_item(array $item)
+    {
+        if (empty($item['product_id']) || in_array($item['product_id'], array('null', null, 0, '0'), true)) {
+            return false;
+        }
+        $type = isset($item['pricing_schema']['schema_type']) ? (string) $item['pricing_schema']['schema_type'] : '';
+        if ('per_unit' !== $type) {
+            return false;
+        }
+        if (isset($item['type']) && in_array($item['type'], array('tax', 'shipping', 'discount', 'interest_rate', 'sign_up_fee', 'sign_up_fee_discount', 'fee'), true)) {
+            return false;
+        }
+        return true;
     }
 
     protected function calculate_discount($order_items)
@@ -698,12 +755,15 @@ class VindiPaymentProcessor
             $full_price = $this->calculate_full_price($order_item);
             $remainder = $this->apply_discount($order_item, $full_price, $remainder);
 
-            if ($order_item['product_id'] === $taxa_id['vindi_id']) {
+            if (isset($order_item['product_id']) && $order_item['product_id'] === $taxa_id['vindi_id']) {
                 $total_discount = $this->validate_discount_percentage_sign_up_fee($order_item);
                 $remainder = $this->apply_remainder($remainder, $full_price, $new_order_item);
             }
 
             if ($total_discount > 0) {
+                if (!isset($new_order_item['discounts']) || !is_array($new_order_item['discounts'])) {
+                    $new_order_item['discounts'] = array();
+                }
                 $new_order_item['discounts'][] = array(
                     'discount_type' => 'amount',
                     'amount' => $total_discount,
@@ -835,6 +895,26 @@ class VindiPaymentProcessor
      *
      * @return array
      */
+    /**
+     * Build the sign-up fee descriptor.
+     *
+     * Historically this method returned a standalone Vindi `product_item`
+     * (the "[WC] Taxa de adesão" stub product). Pushing it as a separate
+     * item made Vindi sum the fee onto the recurring price in the first
+     * bill — turning "1st month R$ 9,90" into "1st month R$ 9,90 + recurring
+     * R$ 119,00" (ticket #DSP-…).
+     *
+     * The descriptor returned here is consumed by
+     * `build_product_items_for_subscription()` which translates it into a
+     * one-cycle `discounts` entry on the recurring `plan_item`. Net effect:
+     * the first bill carries the discounted amount (e.g. R$ 109,10), and
+     * every subsequent bill carries the regular price (R$ 119,00).
+     *
+     * @param WC_Order_Item_Product[] $order_items The order items array.
+     *
+     * @return array Empty array when there is no fee; otherwise a
+     *     descriptor consumed by `build_product_items_for_subscription()`.
+     */
     protected function build_sign_up_fee_item($order_items)
     {
         foreach ($order_items as $order_item) {
@@ -847,19 +927,13 @@ class VindiPaymentProcessor
             $sign_up_fee = $product->get_meta('_subscription_sign_up_fee');
 
             if ($sign_up_fee != null && $sign_up_fee > 0) {
-
-                $item = $this->routes->findOrCreateProduct("[WC] Taxa de adesão", "WC-SUF");
-
-                $sign_up_fee_item = array(
-                    'type' => 'sign_up_fee',
-                    'vindi_id' => $item['id'],
-                    'price' => (float) $sign_up_fee,
-                    'qty' => $order_item['quantity'],
+                return array(
+                    'type'                    => 'sign_up_fee_discount',
+                    'vindi_id'                => null,
+                    'price'                   => (float) $sign_up_fee,
+                    'qty'                     => isset($order_item['quantity']) ? (int) $order_item['quantity'] : 1,
+                    'discount_on_first_cycle' => (float) $sign_up_fee,
                 );
-
-                $order_item['price'] -= $sign_up_fee;
-
-                return $sign_up_fee_item;
             }
         }
     }
@@ -900,6 +974,123 @@ class VindiPaymentProcessor
             'qty' => 1,
         );
         return $interest_rate_item;
+    }
+
+    /**
+     * Create the fee item to be added to the bill.
+     *
+     * Aggregates all WC_Order_Item_Fee items from the order (added via
+     * WC()->cart->add_fee() during checkout) into a single bill_item
+     * using a generic Vindi product. This ensures fees like gift wrapping,
+     * service charges or surcharges are forwarded to Vindi and the billed
+     * amount matches the total charged to the customer.
+     *
+     * The Vindi product is created with `schema_type: "flat"` so its
+     * `pricing_schema.price` represents a fixed amount that can be
+     * overridden at the subscription/bill level. Without that schema type
+     * the Vindi API silently ignores the override and the fee comes
+     * through as zero on the bill.
+     *
+     * @param array $order_items The order items (used only for context; fees
+     *     are read directly from $this->order->get_fees()).
+     *
+     * @return array
+     */
+    protected function build_fee_item($order_items)
+    {
+        $fee_item = [];
+        $fees = method_exists($this->order, 'get_fees') ? $this->order->get_fees() : [];
+
+        if (empty($fees)) {
+            return $fee_item;
+        }
+
+        $total_fee = 0.0;
+        $fee_names = [];
+        foreach ($fees as $fee) {
+            $fee_data = method_exists($fee, 'get_data') ? $fee->get_data() : [];
+            $name = $fee_data['name'] ?? ($fee->get_name() ?? '');
+            $amount = isset($fee_data['total']) ? (float) $fee_data['total'] : (float) $fee->get_total();
+            $tax_total = isset($fee_data['total_tax']) ? (float) $fee_data['total_tax'] : 0.0;
+
+            if ($name === __('Juros', VINDI)) {
+                continue;
+            }
+
+            if ($amount > 0) {
+                $total_fee += $amount;
+                if (!empty($name) && !in_array($name, $fee_names, true)) {
+                    $fee_names[] = $name;
+                }
+            }
+        }
+
+        if ($total_fee <= 0) {
+            return $fee_item;
+        }
+
+        $item = $this->create_fee_product();
+        $this->fees_added = $item['id'];
+
+        $fee_item = array(
+            'type' => 'fee',
+            'vindi_id' => $item['id'],
+            'name' => !empty($fee_names) ? implode(', ', $fee_names) : __('Taxa adicional', VINDI),
+            'price' => (float) $total_fee,
+            'qty' => 1,
+            'description' => !empty($fee_names) ? implode(', ', $fee_names) : __('Taxa adicional', VINDI),
+        );
+        return $fee_item;
+    }
+
+    /**
+     * Find or create the generic "Taxa adicional" product on Vindi with a
+     * flat pricing schema, so its per-subscription/bill amount can be
+     * overridden via pricing_schema.price.
+     *
+     * The product was historically created by findOrCreateProduct() with
+     * `schema_type: "per_unit"`, which made the Vindi API ignore the
+     * override and always bill the fee at zero. This helper:
+     *   1. Tries to find an existing "wc-fee" product.
+     *   2. If found but with the wrong schema_type, updates it to "flat".
+     *   3. If not found, creates it with `schema_type: "flat"`.
+     *
+     * @return array The Vindi product representation.
+     */
+    protected function create_fee_product()
+    {
+        $code   = 'wc-fee';
+        $name   = 'Taxa adicional';
+        $existing = $this->routes->findProductByCode($code);
+
+        if ($existing) {
+            $current_type = $existing['pricing_schema']['schema_type'] ?? null;
+            if ($current_type !== 'flat') {
+                $updated = $this->routes->updateProduct($existing['id'], array(
+                    'name'           => $name,
+                    'code'           => $code,
+                    'status'         => 'active',
+                    'pricing_schema' => array(
+                        'price'       => 0,
+                        'schema_type' => 'flat',
+                    ),
+                ));
+                if (is_array($updated) && isset($updated['id'])) {
+                    return $updated;
+                }
+            }
+            return $existing;
+        }
+
+        return $this->routes->createProduct(array(
+            'name'           => $name,
+            'code'           => $code,
+            'status'         => 'active',
+            'pricing_schema' => array(
+                'price'       => 0,
+                'schema_type' => 'flat',
+            ),
+        ));
     }
 
     /**
@@ -1045,12 +1236,24 @@ class VindiPaymentProcessor
 
         if (
             'discount' == $order_item['type'] || 'shipping' == $order_item['type'] ||
-            'tax' == $order_item['type'] || 'interest_rate' == $order_item['type'] || 'sign_up_fee' == $order_item['type']
+            'tax' == $order_item['type'] || 'interest_rate' == $order_item['type'] ||
+            'sign_up_fee' == $order_item['type']
         ) {
             $item = array(
                 'product_id' => $order_item['vindi_id'],
                 'amount' => $order_item['price'],
             );
+        } elseif ('fee' === $order_item['type']) {
+            $item = array(
+                'product_id' => $order_item['vindi_id'],
+                'pricing_schema' => array(
+                    'price' => (float) $order_item['price'],
+                    'schema_type' => 'flat',
+                ),
+            );
+            if (!empty($order_item['description'])) {
+                $item['description'] = (string) $order_item['description'];
+            }
         }
 
         return $item;
@@ -1076,6 +1279,20 @@ class VindiPaymentProcessor
                 'schema_type' => 'per_unit',
             ),
         );
+
+        if (isset($order_item['type']) && 'fee' === $order_item['type']) {
+            $product_item = array(
+                'product_id' => $order_item['vindi_id'],
+                'quantity'   => 1,
+                'cycles'     => 1,
+                'pricing_schema' => array(
+                    'price'       => (float) $order_item['price'],
+                    'schema_type' => 'flat',
+                ),
+            );
+            return $product_item;
+        }
+
         $coupons = array_values($this->vindi_settings->woocommerce->cart->get_coupons());
 
         if (!empty($coupons) && $order_item['type'] == 'line_item') {
@@ -1271,6 +1488,7 @@ class VindiPaymentProcessor
             $data['plan_id'] = $this->get_plan_from_order_item($order_item);
             $wc_subscription_id = VindiHelpers::get_matching_subscription($this->order, $order_item)->id;
             $data['code'] = strpos($wc_subscription_id, 'WC') > 0 ? $wc_subscription_id : 'WC-' . $wc_subscription_id;
+            $this->sync_plan_trial_settings($order_item, $data['plan_id'], $wc_subscription_id);
         }
         $data['product_items'] = $this->get_build_products($data, $order_item);
         $subscription = $this->routes->createSubscription($data);
@@ -1283,6 +1501,99 @@ class VindiPaymentProcessor
             $this->order->save();
         }
         return $subscription;
+    }
+
+    /**
+     * Push the trial configuration of the WooCommerce order item to the
+     * matching Vindi plan, so a checkout honours the trial even when the
+     * plan was created under the old `beginning_of_period` defaults.
+     *
+     * The mirror meta `vindi_billing_trigger_type` on the WC
+     * subscription is also refreshed with the value Vindi accepted, so
+     * later webhook handlers (WebhooksHelpers::handle_trial_period)
+     * make decisions based on ground truth instead of guesses.
+     *
+     * @param WC_Order_Item_Product $order_item        The subscription line item.
+     * @param int|string            $plan_id           The Vindi plan id.
+     * @param int                   $wc_subscription_id Optional. The matching WC subscription id.
+     */
+    private function sync_plan_trial_settings($order_item, $plan_id, $wc_subscription_id = 0)
+    {
+        if (empty($plan_id)) {
+            return;
+        }
+
+        $product = $order_item->get_product();
+        if (!$product || !$this->is_subscription_type($product)) {
+            return;
+        }
+
+        $current = $this->routes->getPlan($plan_id);
+        if (!$current || !isset($current['id'])) {
+            return;
+        }
+
+        $trial_length = (int) $product->get_meta('_subscription_trial_length');
+        $trial_period = (string) ($product->get_meta('_subscription_trial_period') ?: 'day');
+        $trigger_type = $trial_length > 0 ? 'end_of_period' : 'beginning_of_period';
+        $trigger_day  = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
+
+        if (
+            isset($current['billing_trigger_type'], $current['billing_trigger_day'])
+            && $current['billing_trigger_type'] === $trigger_type
+            && (int) $current['billing_trigger_day'] === (int) $trigger_day
+        ) {
+            $this->mirror_billing_trigger_type($wc_subscription_id, $current['billing_trigger_type']);
+            return;
+        }
+
+        $payload = array(
+            'name'                 => $current['name'] ?? '[WC] ' . $product->get_name(),
+            'interval'             => $current['interval'] ?? 'months',
+            'interval_count'       => isset($current['interval_count']) ? (int) $current['interval_count'] : 1,
+            'billing_trigger_type' => $trigger_type,
+            'billing_trigger_day'  => (int) $trigger_day,
+            'code'                 => $current['code'] ?? null,
+            'installments'         => isset($current['installments']) ? (int) $current['installments'] : 1,
+            'status'               => $current['status'] ?? 'active',
+        );
+
+        if (array_key_exists('billing_cycles', $current) && $current['billing_cycles'] !== null) {
+            $payload['billing_cycles'] = (int) $current['billing_cycles'];
+        }
+
+        $updated = $this->routes->updatePlan($plan_id, $payload);
+        if (!$updated || !isset($updated['id'])) {
+            $this->logger->log(sprintf(
+                'Falha ao sincronizar billing_trigger do plano %s para o pedido %s.',
+                $plan_id,
+                $this->order->get_id()
+            ));
+            return;
+        }
+
+        $this->mirror_billing_trigger_type($wc_subscription_id, $trigger_type);
+    }
+
+    /**
+     * Persist the billing_trigger_type that Vindi will use for this
+     * subscription, so webhooks can read it via
+     * `$subscription->get_meta('vindi_billing_trigger_type', true)`.
+     *
+     * @param int    $wc_subscription_id The WC subscription id (0 to skip).
+     * @param string $trigger_type       Either "end_of_period" or "beginning_of_period".
+     */
+    private function mirror_billing_trigger_type($wc_subscription_id, $trigger_type)
+    {
+        if (empty($wc_subscription_id)) {
+            return;
+        }
+        $wc_subscription = wcs_get_subscription($wc_subscription_id);
+        if (!$wc_subscription || !is_a($wc_subscription, 'WC_Subscription')) {
+            return;
+        }
+        $wc_subscription->update_meta_data('vindi_billing_trigger_type', $trigger_type);
+        $wc_subscription->save();
     }
 
     private function get_build_products($data, $order_item)
@@ -1356,6 +1667,13 @@ class VindiPaymentProcessor
     /**
      * Create bill meta array to add to the order
      *
+     * Extracts the relevant fields from the Vindi bill response so the
+     * WooCommerce order meta carries the information the ERP needs without
+     * having to re-parse the raw JSON stored in the plugin's transaction
+     * table. For credit card payments it also surfaces the card brand
+     * (read from payment_company.code with a fallback to
+     * last_transaction.gateway_response_fields.brand).
+     *
      * @param array $bill The bill returned from Vindi API
      *
      * @return array
@@ -1365,23 +1683,150 @@ class VindiPaymentProcessor
         $bill_meta = [];
         $bill_meta['id'] = $bill['id'];
         $bill_meta['status'] = $bill['status'];
+        $bill_meta['payment_method'] = $this->payment_method_code();
 
         if (isset($bill['charges']) && count($bill['charges'])) {
             $charges = end($bill['charges']);
             $bill_meta['bank_slip_url'] = $charges['print_url'] ?? '';
+            $bill_meta['charge_id'] = $charges['id'] ?? null;
+
+            if ('credit_card' === $this->payment_method_code()) {
+                $brand = $this->extract_credit_card_brand($charges);
+                if (!empty($brand)) {
+                    $bill_meta['brand'] = $brand;
+                    $bill_meta['payment_company'] = $brand;
+                }
+
+                $last_four = $this->extract_credit_card_last_four($charges);
+                if (!empty($last_four)) {
+                    $bill_meta['card_last_four'] = $last_four;
+                }
+
+                $installments = $charges['installments'] ?? ($bill['installments'] ?? null);
+                if (!empty($installments)) {
+                    $bill_meta['installments'] = (int) $installments;
+                }
+            }
 
             if (
                 array_intersect([$this->payment_method_code()], ['pix', 'pix_bank_slip'])
                 && isset($charges['last_transaction']['gateway_response_fields'])
             ) {
                 $transaction = $charges['last_transaction']['gateway_response_fields'];
-                $bill_meta['charge_id'] = $charges['id'];
                 $bill_meta['pix_expiration'] = $transaction['max_days_to_keep_waiting_payment'] ?? '';
-                $bill_meta['pix_code'] = $transaction['qrcode_original_path'];
-                $bill_meta['pix_qr'] = $transaction['qrcode_path'];
+                $bill_meta['pix_code'] = $transaction['qrcode_original_path'] ?? '';
+                $bill_meta['pix_qr'] = $transaction['qrcode_path'] ?? '';
             }
         }
         return $bill_meta;
+    }
+
+    /**
+     * Extract the credit card brand from a Vindi charge.
+     *
+     * Prefers the canonical payment_company.code returned by the Vindi
+     * API (e.g. "mastercard", "visa", "amex") and falls back to the
+     * legacy last_transaction.gateway_response_fields.brand string.
+     *
+     * @param array $charges A single charge array from the bill response.
+     *
+     * @return string Empty string when the brand cannot be determined.
+     */
+    protected function extract_credit_card_brand(array $charges)
+    {
+        if (!empty($charges['payment_company']['code'])) {
+            return (string) $charges['payment_company']['code'];
+        }
+        if (!empty($charges['payment_company']['name'])) {
+            return (string) $charges['payment_company']['name'];
+        }
+        if (!empty($charges['last_transaction']['gateway_response_fields']['brand'])) {
+            return (string) $charges['last_transaction']['gateway_response_fields']['brand'];
+        }
+        return '';
+    }
+
+    /**
+     * Extract the last four digits of the credit card from a Vindi charge.
+     *
+     * @param array $charges A single charge array from the bill response.
+     *
+     * @return string Empty string when the digits cannot be determined.
+     */
+    protected function extract_credit_card_last_four(array $charges)
+    {
+        if (!empty($charges['last_transaction']['gateway_response_fields']['card_number_last_four'])) {
+            return (string) $charges['last_transaction']['gateway_response_fields']['card_number_last_four'];
+        }
+        if (!empty($charges['last_transaction']['gateway_response_fields']['card_number'])) {
+            $card = preg_replace('/\D/', '', (string) $charges['last_transaction']['gateway_response_fields']['card_number']);
+            if (strlen($card) >= 4) {
+                return substr($card, -4);
+            }
+        }
+        return '';
+    }
+
+    /**
+     * Persist the credit card brand as a dedicated order meta so external
+     * integrations (ERPs) can read it directly from wp_postmeta without
+     * having to deserialize the JSON stored under vindi_order.
+     *
+     * Walks the bill meta produced by create_bill_meta_for_order() and
+     * stores the first brand encountered. Also writes the last four digits
+     * and the number of installments when available, so the ERP does not
+     * have to dig through the JSON for any of those values.
+     *
+     * The meta is only written when the order is paid with a credit card,
+     * to avoid leaving stale values for orders paid via other methods.
+     *
+     * @param array $order_post_meta The full order_post_meta structure that
+     *     is about to be stored under the "vindi_order" meta key.
+     */
+    protected function persist_credit_card_brand_meta(array $order_post_meta)
+    {
+        $brand        = '';
+        $last_four    = '';
+        $installments = null;
+
+        foreach ($order_post_meta as $entry) {
+            if (!isset($entry['bill']) || !is_array($entry['bill'])) {
+                continue;
+            }
+            $bill = $entry['bill'];
+            if (empty($brand) && !empty($bill['brand'])) {
+                $brand = (string) $bill['brand'];
+            }
+            if (empty($last_four) && !empty($bill['card_last_four'])) {
+                $last_four = (string) $bill['card_last_four'];
+            }
+            if (null === $installments && isset($bill['installments'])) {
+                $installments = (int) $bill['installments'];
+            }
+            if (!empty($brand) && !empty($last_four) && null !== $installments) {
+                break;
+            }
+        }
+
+        $is_credit_card = ('credit_card' === $this->payment_method_code());
+
+        if ($is_credit_card && '' !== $brand) {
+            $this->order->update_meta_data('_vindi_credit_card_brand', $brand);
+        } else {
+            $this->order->delete_meta_data('_vindi_credit_card_brand');
+        }
+
+        if ($is_credit_card && '' !== $last_four) {
+            $this->order->update_meta_data('_vindi_credit_card_last_four', $last_four);
+        } else {
+            $this->order->delete_meta_data('_vindi_credit_card_last_four');
+        }
+
+        if ($is_credit_card && null !== $installments && $installments > 0) {
+            $this->order->update_meta_data('_vindi_credit_card_installments', $installments);
+        } else {
+            $this->order->delete_meta_data('_vindi_credit_card_installments');
+        }
     }
 
     /**

@@ -154,11 +154,79 @@ class VindiWebhooks
             $order->payment_complete();
         }
         $order->update_meta_data('vindi_order', $order_post_meta);
+        $this->persist_credit_card_brand_meta($order, $order_post_meta);
         $order->save();
         $this->vindi_settings->logger->log('Novo Período criado: Pedido #'.$order->id);
 
         // We've already processed the renewal
         remove_action('woocommerce_scheduled_subscription_payment', 'WC_Subscriptions_Manager::prepare_renewal');
+    }
+
+  /**
+   * Mirror the credit card brand (and related fields) from the bill meta
+   * to dedicated order meta keys so external integrations (ERPs) can
+   * read them directly from wp_postmeta without having to deserialize
+   * the JSON stored under vindi_order.
+   *
+   * Behaviour:
+   *  - When the bill belongs to a credit card payment, the brand, last
+   *    four digits and number of installments are written as
+   *    `_vindi_credit_card_brand`, `_vindi_credit_card_last_four` and
+   *    `_vindi_credit_card_installments` respectively.
+   *  - When the bill is paid via any other method, the meta keys are
+   *    removed from the order to avoid stale data carrying over from a
+   *    previous attempt.
+   *
+   * @param WC_Order $order           The WooCommerce order being updated.
+   * @param array    $order_post_meta The order_post_meta structure stored
+   *     under the "vindi_order" meta key.
+   */
+    private function persist_credit_card_brand_meta(WC_Order $order, array $order_post_meta)
+    {
+        $brand        = '';
+        $last_four    = '';
+        $installments = null;
+        $is_credit_card = false;
+
+        foreach ($order_post_meta as $entry) {
+            if (!is_array($entry) || !isset($entry['bill']) || !is_array($entry['bill'])) {
+                continue;
+            }
+            $bill = $entry['bill'];
+            if (!empty($bill['payment_method']) && 'credit_card' === $bill['payment_method']) {
+                $is_credit_card = true;
+            }
+            if (empty($brand) && !empty($bill['brand'])) {
+                $brand = (string) $bill['brand'];
+            }
+            if (empty($last_four) && !empty($bill['card_last_four'])) {
+                $last_four = (string) $bill['card_last_four'];
+            }
+            if (null === $installments && isset($bill['installments'])) {
+                $installments = (int) $bill['installments'];
+            }
+            if (!empty($brand) && !empty($last_four) && null !== $installments && $is_credit_card) {
+                break;
+            }
+        }
+
+        if ($is_credit_card && '' !== $brand) {
+            $order->update_meta_data('_vindi_credit_card_brand', $brand);
+        } else {
+            $order->delete_meta_data('_vindi_credit_card_brand');
+        }
+
+        if ($is_credit_card && '' !== $last_four) {
+            $order->update_meta_data('_vindi_credit_card_last_four', $last_four);
+        } else {
+            $order->delete_meta_data('_vindi_credit_card_last_four');
+        }
+
+        if ($is_credit_card && null !== $installments && $installments > 0) {
+            $order->update_meta_data('_vindi_credit_card_installments', $installments);
+        } else {
+            $order->delete_meta_data('_vindi_credit_card_installments');
+        }
     }
 
   /**
