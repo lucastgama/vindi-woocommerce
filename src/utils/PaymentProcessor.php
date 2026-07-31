@@ -291,26 +291,26 @@ class VindiPaymentProcessor
     public function change_method_payment($subscription_id)
     {
         $payment_method = filter_input(INPUT_POST, 'payment_method');
-    
+
         $payment_methods = [
             'vindi-credit-card' => $this->change_payment_to_credit_card(),
             'vindi-bank-slip'   => ["payment_method_code" => "bank_slip"],
             'vindi-pix'         => ["payment_method_code" => "pix"],
             'vindi-bolepix'     => ["payment_method_code" => "pix_bank_slip"],
         ];
-    
+
         if (!isset($payment_methods[$payment_method])) {
             return false;
         }
-    
+
         $payment_data = $payment_methods[$payment_method];
         $update_response = $this->routes->updateSubscription($subscription_id, $payment_data);
-    
+
         if ($update_response) {
             wc_add_notice(__('O método de pagamento foi alterado!', 'vindi-payment-gateway'), 'success');
             return $update_response;
         }
-    
+
         return false;
     }
 
@@ -423,12 +423,12 @@ class VindiPaymentProcessor
                     throw new Exception($message);
                 }
 
-                $subscription_obj = wcs_get_subscription( $wc_subscription_id );
-                if ( $subscription_obj && is_a( $subscription_obj, 'WC_Subscription' ) ) {
-                    $subscription_obj->update_meta_data( 'vindi_subscription_id', $subscription_id );
+                $subscription_obj = wcs_get_subscription($wc_subscription_id);
+                if ($subscription_obj && is_a($subscription_obj, 'WC_Subscription')) {
+                    $subscription_obj->update_meta_data('vindi_subscription_id', $subscription_id);
                     $subscription_obj->save();
                 }
-                
+
                 continue;
             } catch (Exception $err) {
                 $message = $err->getMessage();
@@ -681,10 +681,10 @@ class VindiPaymentProcessor
     protected function build_items($order_items, $call_build_items)
     {
         $product_items = [];
-        $suf_discount = 0.0;
+        $suf_descriptor = null;
         foreach ($order_items as $idx => $candidate) {
             if (isset($candidate['type']) && 'sign_up_fee_discount' === $candidate['type']) {
-                $suf_discount = (float) ($candidate['discount_on_first_cycle'] ?? $candidate['price'] ?? 0);
+                $suf_descriptor = $candidate;
                 unset($order_items[$idx]);
                 break;
             }
@@ -693,23 +693,43 @@ class VindiPaymentProcessor
         foreach (array_values($order_items) as $order_item) {
             if (!empty($order_item)) {
                 $newProduct = $this->$call_build_items($order_item);
-                if ($suf_discount > 0 && $this->is_recurring_plan_item($newProduct)) {
-                    $existing = isset($newProduct['discounts']) && is_array($newProduct['discounts'])
-                        ? $newProduct['discounts']
-                        : array();
-                    $existing[] = array(
-                        'discount_type' => 'amount',
-                        'amount'        => $suf_discount,
-                        'cycles'        => 1,
-                    );
-                    $newProduct['discounts'] = $existing;
-                    $suf_discount = 0;
-                }
                 $product_items[] = $newProduct;
             }
         }
 
+        if ($suf_descriptor !== null) {
+            $product_items[] = array(
+                'product_id' => $this->find_or_create_sign_up_fee_product(),
+                'quantity'   => isset($suf_descriptor['qty']) ? (int) $suf_descriptor['qty'] : 1,
+                'cycles'     => 1,
+                'pricing_schema' => array(
+                    'price'       => (float) $suf_descriptor['price'],
+                    'schema_type' => 'per_unit',
+                ),
+            );
+        }
+
         return $product_items;
+    }
+
+    private function find_or_create_sign_up_fee_product()
+    {
+        $existing = $this->routes->findProductByCode('WC-SUF');
+        if ($existing && isset($existing['id'])) {
+            return (int) $existing['id'];
+        }
+
+        $created = $this->routes->createProduct(array(
+            'name' => '[WC] Taxa de adesão',
+            'code' => 'WC-SUF',
+            'status' => 'active',
+            'pricing_schema' => array(
+                'price' => 0,
+                'schema_type' => 'per_unit',
+            ),
+        ));
+
+        return (int) ($created['id'] ?? 0);
     }
 
     /**
@@ -1367,7 +1387,7 @@ class VindiPaymentProcessor
         } elseif (strpos($discount_type, 'fixed') !== false) {
             $discount_item['discount_type'] = 'amount';
             $discount_item['amount'] = (float) $amount;
-        } elseif (strpos($discount_type, 'percent') !== false ||strpos($discount_type, 'recurring_percent') !== false) {
+        } elseif (strpos($discount_type, 'percent') !== false || strpos($discount_type, 'recurring_percent') !== false) {
             $discount_item['discount_type'] = 'amount';
             $discount_item['amount'] = abs($amount / 100 * ($order_item['price'] * $order_item['quantity']));
         }
@@ -1490,17 +1510,94 @@ class VindiPaymentProcessor
             $data['code'] = strpos($wc_subscription_id, 'WC') > 0 ? $wc_subscription_id : 'WC-' . $wc_subscription_id;
             $this->sync_plan_trial_settings($order_item, $data['plan_id'], $wc_subscription_id);
         }
-        $data['product_items'] = $this->get_build_products($data, $order_item);
+
+        $data['product_items'] = $this->get_plan_only_products($data['plan_id']);
+
         $subscription = $this->routes->createSubscription($data);
         if (!isset($subscription['id']) || empty($subscription['id'])) {
             throw new Exception(sprintf(__('Pagamento Falhou. (%s)', VINDI), $this->vindi_settings->api->last_error));
         }
         $subscription['wc_id'] = $wc_subscription_id;
+
+        $this->create_sign_up_fee_bill(
+            $customer_id,
+            $order_item,
+            $subscription
+        );
+
         if (isset($subscription['bill']['id'])) {
             $this->order->update_meta_data('vindi_bill_id', $subscription['bill']['id']);
             $this->order->save();
         }
         return $subscription;
+    }
+
+    /**
+     * Build the bare-minimum product_items payload for a plan-based
+     * subscription: an empty array so Vindi uses the plan's own
+     * plan_items for billing. The plan already has the price and
+     * trial configured via sync_plan_trial_settings(), so no
+     * override is needed.
+     *
+     * @param int|string $plan_id
+     *
+     * @return array
+     */
+    private function get_plan_only_products($plan_id)
+    {
+        unset($plan_id); // signature kept for parity with future override needs
+        return array();
+    }
+
+    /**
+     * Charge the WooCommerce `_subscription_sign_up_fee` as a one-time
+     * bill on the customer's account. The Vindi subscription itself
+     * only carries the recurring plan (with trial honoured by the
+     * end_of_period trigger); the fee is billed separately so it
+     * shows up on its own line on the customer-facing invoice.
+     *
+     * @param int                  $customer_id
+     * @param WC_Order_Item_Product $order_item
+     * @param array                $subscription Vindi subscription payload.
+     */
+    private function create_sign_up_fee_bill($customer_id, $order_item, $subscription)
+    {
+        unset($subscription);
+
+        $product = $order_item->get_product();
+        $sign_up_fee = (float) $product->get_meta('_subscription_sign_up_fee');
+        if ($sign_up_fee <= 0) {
+            return;
+        }
+
+        $suf_product = $this->find_or_create_sign_up_fee_product();
+        $bill_data = array(
+            'customer_id'        => $customer_id,
+            'payment_method_code' => $this->payment_method_code(),
+            'installments'        => 1,
+            'code'                => (string) $this->order->get_id() . '-SUF',
+            'bill_items'          => array(
+                array(
+                    'product_id' => $suf_product,
+                    'amount'      => $sign_up_fee,
+                ),
+            ),
+        );
+
+        $bill = $this->routes->createBill($bill_data);
+        if (!$bill || !isset($bill['id'])) {
+            $this->logger->log(sprintf(
+                'Falha ao criar bill avulso para taxa de adesao do pedido %s.',
+                $this->order->get_id()
+            ));
+            return;
+        }
+
+        $this->logger->log(sprintf(
+            'Taxa de adesao do pedido %s criada como bill avulso #%s.',
+            $this->order->get_id(),
+            $bill['id']
+        ));
     }
 
     /**
