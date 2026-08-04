@@ -375,6 +375,32 @@ class PlansController
         )
       );
 
+    error_log(
+      '_subscription_trial_period=' .
+        var_export(
+          $product->get_meta('_subscription_trial_period'),
+          true
+        )
+    );
+    error_log(
+      'POST subscription_period=' .
+        var_export($_POST['_subscription_period'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_length=' .
+        var_export($_POST['_subscription_length'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_trial_length=' .
+        var_export($_POST['_subscription_trial_length'] ?? null, true)
+    );
+
+    error_log(
+      'POST subscription_trial_period=' .
+        var_export($_POST['_subscription_trial_period'] ?? null, true)
+    );
     // Creates the plan within the Vindi
     $createdPlan = $this->routes->createPlan(array(
       'name' => VINDI_PREFIX_PLAN . $data['name'],
