@@ -11,7 +11,7 @@ Tested up to: 6.8
 WC requires at least: 3.0.0
 WC tested up to: 8.6.1
 Requires PHP: 5.6
-Stable Tag: 1.4.5
+Stable Tag: 1.4.6
 License: GPLv3
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -39,6 +39,12 @@ Para dúvidas e suporte técnico, entre em contato com a equipe Vindi através d
 5. Configurações de pagamentos via cartão de crédito
 
 == Changelog ==
+= 1.4.6 - 31/07/2026 =
+- Lançamento da versão de patch.
+- **Correção:** Valores do fee agora são considerados no total do pedido, permitindo que plugins com valores extras sejam somados corretamente.
+- **Melhoria:** Envio adicional de dados do cartão (bandeira, últimos 4 dígitos e número de parcelas) ao ERP, em campos próprios do pedido.
+- **Correção:** Valores de assinatura com período de trial (free trial) agora respeitam a taxa de adesão e o ciclo correto, evitando cobranças duplicadas ou antecipadas.
+
 = 1.4.5 - 22/01/2026 =
 -Lançamento da versão de patch.
 - **Correção:** Remoção de mensagens de erros.
