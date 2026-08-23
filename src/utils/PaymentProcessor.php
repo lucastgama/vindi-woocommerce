@@ -879,11 +879,20 @@ class VindiPaymentProcessor
 
         $get_vindi = $this->get_vindi_code($product_id);
         $order_items['vindi_id'] = $get_vindi ? $get_vindi : $product->vindi_id;
-        if ($this->subscription_has_trial($product)) {
+        // Sempre usar o preço do produto cadastrado (não o subtotal da order/subscription,
+        // que pode estar contaminado com a SUF por causa de hooks do WC_Subscriptions).
+        $product_price = (float) $product->get_price();
+        if ($product_price > 0) {
+            $order_items['price'] = $product_price;
+        } elseif ($this->subscription_has_trial($product)) {
             $matching_item = $this->get_trial_matching_subscription_item($order_items);
-            $order_items['price'] = (float) $matching_item['subtotal'] / $matching_item['qty'];
+            if ($matching_item && isset($matching_item['subtotal'], $matching_item['qty']) && (float) $matching_item['subtotal'] > 0) {
+                $order_items['price'] = (float) $matching_item['subtotal'] / $matching_item['qty'];
+            } else {
+                $order_items['price'] = (float) ($order_items['subtotal'] ?? 0) / max(1, (int) ($order_items['qty'] ?? 1));
+            }
         } else {
-            $order_items['price'] = (float) $order_items['subtotal'] / $order_items['qty'];
+            $order_items['price'] = (float) ($order_items['subtotal'] ?? 0) / max(1, (int) ($order_items['qty'] ?? 1));
         }
         return $order_items;
     }
@@ -1127,22 +1136,49 @@ class VindiPaymentProcessor
         $shipping_method = $this->order->get_shipping_method();
         $get_total_shipping = $this->order->get_shipping_total();
 
-        if (empty($shipping_method)) {
+        // Quando o pedido é uma assinatura com trial, o WooCommerce transfere
+        // o método de envio e o frete para a WC_Subscription. O $this->order
+        // pode estar vazio. Se for, buscar direto na subscription ANTES do
+        // early return abaixo.
+        if ((empty($shipping_method) || (float) $get_total_shipping <= 0) && is_array($order_items)) {
+            foreach ($order_items as $order_item) {
+                if (!is_object($order_item) || !method_exists($order_item, 'get_product')) {
+                    continue;
+                }
+                $product = $order_item->get_product();
+                if (!$product || !$this->is_subscription_type($product)) {
+                    continue;
+                }
+                $wc_subscription = VindiHelpers::get_matching_subscription($this->order, $order_item);
+                if ($wc_subscription) {
+                    $sub_method = $wc_subscription->get_shipping_method();
+                    $sub_total  = (float) $wc_subscription->get_total_shipping();
+                    if (!empty($sub_method) && $sub_total > 0) {
+                        $shipping_method     = $sub_method;
+                        $get_total_shipping = $sub_total;
+                    }
+                }
+                break;
+            }
+        }
+
+        if (empty($shipping_method) || (float) $get_total_shipping <= 0) {
             return $shipping_item;
         }
 
         foreach ($order_items as $order_item) {
-            $wc_subscription = VindiHelpers::get_matching_subscription($this->order, $order_item);
             $product = $order_item->get_product();
 
             $one_time_shipping = $this->is_one_time_shipping($product) && $this->single_freight ? true : false;
 
             if ($this->is_subscription_type($product) && !$one_time_shipping) {
+                $wc_subscription = VindiHelpers::get_matching_subscription($this->order, $order_item);
                 $shipping_method = $wc_subscription->get_shipping_method();
                 $get_total_shipping = $wc_subscription->get_total_shipping();
+                error_log('[Vindi] build_shipping_item - Subscription type: shipping_method="' . $shipping_method . '" total=' . $get_total_shipping);
             }
 
-            if ($product->needs_shipping()) {
+            if (!empty($shipping_method) && (float) $get_total_shipping > 0) {
                 $item = $this->create_shipping_product($shipping_method);
                 $shipping_item = array(
                     'type' => 'shipping',
@@ -1150,6 +1186,8 @@ class VindiPaymentProcessor
                     'price' => $get_total_shipping,
                     'qty' => 1,
                 );
+                error_log('[Vindi] build_shipping_item - Shipping item criado: vindi_id=' . $item['id'] . ' price=' . $get_total_shipping);
+                break;
             }
         }
         return $shipping_item;
@@ -1511,7 +1549,7 @@ class VindiPaymentProcessor
             $this->sync_plan_trial_settings($order_item, $data['plan_id'], $wc_subscription_id);
         }
 
-        $data['product_items'] = $this->get_plan_only_products($data['plan_id']);
+        $data['product_items'] = $this->build_product_items($order_item, 'subscription');
 
         $subscription = $this->routes->createSubscription($data);
         if (!isset($subscription['id']) || empty($subscription['id'])) {
@@ -1519,85 +1557,11 @@ class VindiPaymentProcessor
         }
         $subscription['wc_id'] = $wc_subscription_id;
 
-        $this->create_sign_up_fee_bill(
-            $customer_id,
-            $order_item,
-            $subscription
-        );
-
         if (isset($subscription['bill']['id'])) {
             $this->order->update_meta_data('vindi_bill_id', $subscription['bill']['id']);
             $this->order->save();
         }
         return $subscription;
-    }
-
-    /**
-     * Build the bare-minimum product_items payload for a plan-based
-     * subscription: an empty array so Vindi uses the plan's own
-     * plan_items for billing. The plan already has the price and
-     * trial configured via sync_plan_trial_settings(), so no
-     * override is needed.
-     *
-     * @param int|string $plan_id
-     *
-     * @return array
-     */
-    private function get_plan_only_products($plan_id)
-    {
-        unset($plan_id); // signature kept for parity with future override needs
-        return array();
-    }
-
-    /**
-     * Charge the WooCommerce `_subscription_sign_up_fee` as a one-time
-     * bill on the customer's account. The Vindi subscription itself
-     * only carries the recurring plan (with trial honoured by the
-     * end_of_period trigger); the fee is billed separately so it
-     * shows up on its own line on the customer-facing invoice.
-     *
-     * @param int                  $customer_id
-     * @param WC_Order_Item_Product $order_item
-     * @param array                $subscription Vindi subscription payload.
-     */
-    private function create_sign_up_fee_bill($customer_id, $order_item, $subscription)
-    {
-        unset($subscription);
-
-        $product = $order_item->get_product();
-        $sign_up_fee = (float) $product->get_meta('_subscription_sign_up_fee');
-        if ($sign_up_fee <= 0) {
-            return;
-        }
-
-        $suf_product = $this->find_or_create_sign_up_fee_product();
-        $bill_data = array(
-            'customer_id'        => $customer_id,
-            'payment_method_code' => $this->payment_method_code(),
-            'installments'        => 1,
-            'code'                => (string) $this->order->get_id() . '-SUF',
-            'bill_items'          => array(
-                array(
-                    'product_id' => $suf_product,
-                    'amount'      => $sign_up_fee,
-                ),
-            ),
-        );
-
-        $bill = $this->routes->createBill($bill_data);
-        if (!$bill || !isset($bill['id'])) {
-            $this->logger->log(sprintf(
-                'Falha ao criar bill avulso para taxa de adesao do pedido %s.',
-                $this->order->get_id()
-            ));
-            return;
-        }
-
-        $this->logger->log(sprintf(
-            'Taxa de adesao do pedido %s criada como bill avulso #%s.',
-            $this->order->get_id(),
-            $bill['id']
-        ));
     }
 
     /**
