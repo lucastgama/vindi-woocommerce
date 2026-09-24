@@ -1059,11 +1059,11 @@ class VindiPaymentProcessor
         }
 
         $item = $this->create_fee_product();
-        $this->fees_added = $item['id'];
+        $this->fees_added = !empty($item['id']) ? (int) $item['id'] : null;
 
         $fee_item = array(
             'type' => 'fee',
-            'vindi_id' => $item['id'],
+            'vindi_id' => !empty($item['id']) ? (int) $item['id'] : null,
             'name' => !empty($fee_names) ? implode(', ', $fee_names) : __('Taxa adicional', VINDI),
             'price' => (float) $total_fee,
             'qty' => 1,
@@ -1090,9 +1090,11 @@ class VindiPaymentProcessor
     {
         $code   = 'wc-fee';
         $name   = 'Taxa adicional';
+        delete_transient('vindi_product_' . $code);
+
         $existing = $this->routes->findProductByCode($code);
 
-        if ($existing) {
+        if ($existing && !empty($existing['id'])) {
             $current_type = $existing['pricing_schema']['schema_type'] ?? null;
             if ($current_type !== 'flat') {
                 $updated = $this->routes->updateProduct($existing['id'], array(
@@ -1104,14 +1106,15 @@ class VindiPaymentProcessor
                         'schema_type' => 'flat',
                     ),
                 ));
-                if (is_array($updated) && isset($updated['id'])) {
+                if (is_array($updated) && !empty($updated['id'])) {
                     return $updated;
                 }
+            } else {
+                return $existing;
             }
-            return $existing;
         }
 
-        return $this->routes->createProduct(array(
+        $created = $this->routes->createProduct(array(
             'name'           => $name,
             'code'           => $code,
             'status'         => 'active',
@@ -1120,6 +1123,12 @@ class VindiPaymentProcessor
                 'schema_type' => 'flat',
             ),
         ));
+
+        if (!is_array($created) || empty($created['id'])) {
+            $this->abort(__('Não foi possível cadastrar a taxa adicional na Vindi. Verifique os dados e tente novamente.', VINDI), true);
+        }
+
+        return $created;
     }
 
     /**
@@ -1283,11 +1292,12 @@ class VindiPaymentProcessor
      */
     protected function build_product_items_for_bill($order_item)
     {
+
         $item = array(
-            'product_id' => $order_item['vindi_id'],
-            'quantity' => $order_item['qty'],
+            'product_id' => (int) $order_item['vindi_id'],
+            'quantity' => (int) $order_item['qty'],
             'pricing_schema' => array(
-                'price' => $order_item['price'],
+                'price' => (float) $order_item['price'],
                 'schema_type' => 'per_unit',
             ),
         );
@@ -1298,17 +1308,18 @@ class VindiPaymentProcessor
             'sign_up_fee' == $order_item['type']
         ) {
             $item = array(
-                'product_id' => $order_item['vindi_id'],
-                'amount' => $order_item['price'],
+                'product_id' => (int) $order_item['vindi_id'],
+                'amount' => (float) $order_item['price'],
             );
         } elseif ('fee' === $order_item['type']) {
             $item = array(
-                'product_id' => $order_item['vindi_id'],
-                'pricing_schema' => array(
-                    'price' => (float) $order_item['price'],
-                    'schema_type' => 'flat',
-                ),
+                'amount' => round((float) $order_item['price'], 2),
             );
+            if (!empty($order_item['vindi_id'])) {
+                $item['product_id'] = (int) $order_item['vindi_id'];
+            } else {
+                $item['product_code'] = 'wc-fee';
+            }
             if (!empty($order_item['description'])) {
                 $item['description'] = (string) $order_item['description'];
             }
@@ -1340,11 +1351,11 @@ class VindiPaymentProcessor
 
         if (isset($order_item['type']) && 'fee' === $order_item['type']) {
             $product_item = array(
-                'product_id' => $order_item['vindi_id'],
+                'product_id' => (int) $order_item['vindi_id'],
                 'quantity'   => 1,
                 'cycles'     => 1,
                 'pricing_schema' => array(
-                    'price'       => (float) $order_item['price'],
+                    'price'       => round((float) $order_item['price'], 2),
                     'schema_type' => 'flat',
                 ),
             );
