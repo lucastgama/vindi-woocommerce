@@ -95,6 +95,8 @@ class WebhooksHelpers
           'pix_expiration' => $gateway_fields->max_days_to_keep_waiting_payment ?? null,
           'pix_code' => $gateway_fields->qrcode_original_path ?? null,
           'pix_qr' => $gateway_fields->qrcode_path ?? null,
+          'pix_automatic_consent_url' => $data->bill->subscription->pix_automatic_consent_url ?? null,
+          'consent_status' => $data->bill->subscription->consent_status ?? null,
         ];
     }
 

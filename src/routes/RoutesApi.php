@@ -482,6 +482,8 @@ class VindiRoutes
           );
         } else if ('PaymentMethod::BankSlip' === $method['type'] || 'PaymentMethod::OnlineBankSlip' === $method['type']) {
           $payment_methods['bank_slip'] = true;
+        } else if ('PaymentMethod::PixAutomatic' === $method['type']) {
+          $payment_methods['pix_automatic'] = true;
         }
       }
 

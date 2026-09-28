@@ -225,6 +225,9 @@ class VindiPaymentProcessor
             case 'bolepix':
                 $code = 'pix_bank_slip';
                 break;
+            case 'pix_automatic':
+                $code = 'pix_automatic';
+                break;
             default:
                 $code = $this->gateway->type();
                 break;
@@ -293,10 +296,11 @@ class VindiPaymentProcessor
         $payment_method = filter_input(INPUT_POST, 'payment_method');
 
         $payment_methods = [
-            'vindi-credit-card' => $this->change_payment_to_credit_card(),
-            'vindi-bank-slip'   => ["payment_method_code" => "bank_slip"],
-            'vindi-pix'         => ["payment_method_code" => "pix"],
-            'vindi-bolepix'     => ["payment_method_code" => "pix_bank_slip"],
+            'vindi-credit-card'    => $this->change_payment_to_credit_card(),
+            'vindi-bank-slip'      => ["payment_method_code" => "bank_slip"],
+            'vindi-pix'            => ["payment_method_code" => "pix"],
+            'vindi-bolepix'        => ["payment_method_code" => "pix_bank_slip"],
+            'vindi-pix-automatico' => ["payment_method_code" => "pix_automatic"],
         ];
 
         if (!isset($payment_methods[$payment_method])) {
@@ -426,6 +430,11 @@ class VindiPaymentProcessor
                 $subscription_obj = wcs_get_subscription($wc_subscription_id);
                 if ($subscription_obj && is_a($subscription_obj, 'WC_Subscription')) {
                     $subscription_obj->update_meta_data('vindi_subscription_id', $subscription_id);
+                    // Pix Automático: espelhar consent_url e status na assinatura WC
+                    if (isset($subscription['pix_automatic_consent_url']) && !empty($subscription['pix_automatic_consent_url'])) {
+                        $subscription_obj->update_meta_data('vindi_pix_automatic_consent_url', $subscription['pix_automatic_consent_url']);
+                        $subscription_obj->update_meta_data('vindi_pix_automatic_consent_status', 'created');
+                    }
                     $subscription_obj->save();
                 }
 
@@ -1560,6 +1569,13 @@ class VindiPaymentProcessor
             $this->sync_plan_trial_settings($order_item, $data['plan_id'], $wc_subscription_id);
         }
 
+        // Pix Automático exige billing_trigger_type=beginning_of_period e start_at (regra D-2)
+        if ('pix_automatic' === $this->payment_method_code()) {
+            $this->validate_pix_automatic_periodicity($order_item);
+            $data['billing_trigger_type'] = 'beginning_of_period';
+            $data['start_at'] = $this->calculate_pix_automatic_start_at($order_item);
+        }
+
         $data['product_items'] = $this->build_product_items($order_item, 'subscription');
 
         $subscription = $this->routes->createSubscription($data);
@@ -1568,11 +1584,57 @@ class VindiPaymentProcessor
         }
         $subscription['wc_id'] = $wc_subscription_id;
 
+        // Pix Automático: persistir o consent_url retornado pela Vindi
+        if (isset($subscription['pix_automatic_consent_url']) && !empty($subscription['pix_automatic_consent_url'])) {
+            $this->order->update_meta_data('vindi_pix_automatic_consent_url', $subscription['pix_automatic_consent_url']);
+            $this->order->update_meta_data('vindi_pix_automatic_consent_status', 'created');
+            $this->order->save();
+        }
+
         if (isset($subscription['bill']['id'])) {
             $this->order->update_meta_data('vindi_bill_id', $subscription['bill']['id']);
             $this->order->save();
         }
         return $subscription;
+    }
+
+    /**
+     * Valida que o produto tem periodicidade suportada pelo Pix Automático.
+     * Aceita apenas mensal ou semanal (mínimo 7 dias).
+     */
+    protected function validate_pix_automatic_periodicity($order_item)
+    {
+        $product = $order_item->get_product();
+        $period  = $product->get_meta('_subscription_period', true);
+        $interval = (int) $product->get_meta('_subscription_period_interval', true);
+
+        $is_monthly = ('month' === $period && $interval >= 1);
+        $is_weekly  = ('week' === $period && $interval >= 1);
+
+        if (!$is_monthly && !$is_weekly) {
+            $this->abort(
+                __('Pix Automático aceita apenas periodicidade mensal ou semanal.', VINDI),
+                true
+            );
+        }
+    }
+
+    /**
+     * Calcula o start_at para Pix Automático.
+     * Cenário A (cobrança imediata): data de hoje.
+     * Cenário B (agendamento futuro): meta _pix_automatic_start_at no produto (D-2 do vencimento desejado).
+     */
+    protected function calculate_pix_automatic_start_at($order_item)
+    {
+        $product = $order_item->get_product();
+        $custom_start = $product->get_meta('_pix_automatic_start_at', true);
+
+        if (!empty($custom_start)) {
+            return $custom_start;
+        }
+
+        $today = new \DateTime('now', new \DateTimeZone('America/Sao_Paulo'));
+        return $today->format('Y-m-d');
     }
 
     /**
@@ -1788,6 +1850,14 @@ class VindiPaymentProcessor
                 $bill_meta['pix_expiration'] = $transaction['max_days_to_keep_waiting_payment'] ?? '';
                 $bill_meta['pix_code'] = $transaction['qrcode_original_path'] ?? '';
                 $bill_meta['pix_qr'] = $transaction['qrcode_path'] ?? '';
+            }
+
+            // Pix Automático: persistir consent_url e status do consentimento
+            if ('pix_automatic' === $this->payment_method_code()) {
+                $bill_meta['pix_automatic_consent_url'] = $bill['pix_automatic_consent_url']
+                    ?? ($charges['pix_automatic_consent_url'] ?? '');
+                $bill_meta['consent_status'] = $bill['consent_status']
+                    ?? ($charges['consent_status'] ?? 'created');
             }
         }
         return $bill_meta;
