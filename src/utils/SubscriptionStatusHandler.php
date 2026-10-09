@@ -45,7 +45,7 @@ class VindiSubscriptionStatusHandler
     {
         switch ($new_status) {
             case 'on-hold':
-                $this->suspend_status($wc_subscription);
+                $this->handle_on_hold_status($wc_subscription);
                 break;
             case 'active':
                 $this->active_status($wc_subscription, $old_status);
@@ -60,6 +60,42 @@ class VindiSubscriptionStatusHandler
                 }
                 break;
         }
+    }
+
+    /**
+     * Trata mudanças para o status 'on-hold' sem propagar para a API.
+     *
+     * Correção do ticket #101648738:
+     * O WooCommerce Subscriptions coloca a assinatura em `on-hold` no
+     * início de TODA renovação (comportamento padrão do WCS). O comportamento
+     * antigo deste hook era chamar `suspendSubscription()` que executa
+     * `DELETE /v1/subscriptions/{id}` — endpoint permanente de cancelamento
+     * na API da Vindi. Resultado: cada renovação cancelava a assinatura na
+     * Vindi, disparava `webhook subscription_canceled`, o plugin respondia 422
+     * e a Vindi reentregava. Quando a reentrega chegava depois do pagamento
+     * fechar, a assinatura era indevidamente marcada como `pending-cancel`.
+     *
+     * Como a Vindi não expõe endpoint de "pause", a única ação segura
+     * quando o status WC é `on-hold` é NÃO propagar para a Vindi. O
+     * cancelamento real continua sendo tratado no status `cancelled`.
+     *
+     * @param WC_Subscription $wc_subscription
+     */
+    private function handle_on_hold_status($wc_subscription)
+    {
+        if (!$this->vindi_settings->get_synchronism_status()) {
+            return;
+        }
+
+        $vindi_subscription_id = $this->get_vindi_subscription_id($wc_subscription);
+
+        $this->vindi_settings->logger->log(sprintf(
+            __('Status on-hold recebido para a assinatura WC #%s (Vindi #%s). ' .
+               'Não propagando para a Vindi: o endpoint DELETE é permanente e ' .
+               'o estado on-hold é temporário (renovação/pausa).', VINDI),
+            $wc_subscription->get_id(),
+            $vindi_subscription_id ?: 'N/A'
+        ));
     }
 
     /**
