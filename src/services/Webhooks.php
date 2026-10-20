@@ -88,7 +88,7 @@ class VindiWebhooks
       return $this->{$type}($data);
     }
 
-    $this->vindi_settings->logger->log(sprintf(__('Evento do webhook ignorado pelo plugin: ', VINDI), $type));
+    $this->vindi_settings->logger->log(sprintf(__('Evento do webhook ignorado pelo plugin: %s', VINDI), $type));
   }
 
   /**
@@ -123,6 +123,9 @@ class VindiWebhooks
                     ];
                 } elseif (true === $trial_result) {
                     $response = ['message' => 'O estado da assinatura passou para "Em espera"', 'status' => 200];
+                } else {
+                    // O pedido do ciclo já existe (ex.: primeira fatura, criada no checkout).
+                    $response = ['message' => 'Fatura já processada para este ciclo.', 'status' => 200];
                 }
             }
         } catch (\Exception $e) {
@@ -150,7 +153,12 @@ class VindiWebhooks
       ));
     }
 
-        WC_Subscriptions_Manager::prepare_renewal($subscription->id);
+        VindiSubscriptionStatusHandler::start_renewal($subscription->get_id());
+        try {
+            WC_Subscriptions_Manager::prepare_renewal($subscription->get_id());
+        } finally {
+            VindiSubscriptionStatusHandler::finish_renewal($subscription->get_id());
+        }
         $order_id = $subscription->get_last_order();
         $order = $this->find_order_by_id($order_id);
         $subscription_id = $renew_infos['vindi_subscription_id'];
@@ -459,6 +467,9 @@ class VindiWebhooks
             ) {
                 $subscription_id = $data->subscription->code;
                 $subscription = $this->find_subscription_by_id($subscription_id);
+                if ($subscription->has_status('active')) {
+                    return wp_send_json(['message' => 'A assinatura já está ativa.'], 200);
+                }
                 $order_id = $subscription->get_last_order();
                 $order = $this->find_order_by_id($order_id);
                 $status_available = array('processing', 'completed', 'on-hold');

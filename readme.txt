@@ -45,6 +45,9 @@ Para dúvidas e suporte técnico, entre em contato com a equipe Vindi através d
 - **Correção:** A suspensão manual da assinatura, feita pelo lojista ou pelo cliente, continua sendo enviada para a Vindi, interrompendo novas cobranças.
 - **Correção:** O webhook `subscription_canceled` agora consulta o status atual da assinatura na Vindi antes de alterá-la no WooCommerce. Webhooks reentregues depois que a assinatura foi reativada são ignorados. (Ticket #101648738)
 - **Correção:** Quando a consulta à Vindi falha durante o processamento de `subscription_canceled`, o plugin responde HTTP 503 para que a Vindi reenvie o evento, evitando a perda de cancelamentos reais.
+- **Correção:** O webhook `subscription_reactivated` responde HTTP 200 quando a assinatura já está ativa no WooCommerce, evitando reentregas contínuas.
+- **Correção:** O webhook `bill_created` da primeira fatura da assinatura, cujo pedido já foi criado no checkout, passa a responder HTTP 200, evitando reentregas contínuas.
+- **Correção:** Consultas de assinatura sem ID não fazem mais requisição à Vindi, evitando a listagem de todas as assinaturas da conta a cada checkout.
 - **Correção:** O webhook `bill_created` de assinaturas em período de teste com cobrança no fim do período passa a responder HTTP 200, evitando reentregas e erros desnecessários no log.
 - **Correção:** O produto de taxa adicional (`wc-fee`) volta a usar cache na consulta à Vindi e não é mais recriado quando a atualização falha, evitando o bloqueio do checkout.
 - **Melhoria:** Remoção de logs de depuração (`error_log`) que registravam dados do cadastro de planos e produtos.

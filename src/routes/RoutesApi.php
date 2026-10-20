@@ -297,8 +297,17 @@ class VindiRoutes
 	 */
 	public function getSubscription($subscription_id)
 	{
-		if ($response = $this->api->request("subscriptions/". filter_var($subscription_id, FILTER_SANITIZE_NUMBER_INT),'GET')['subscription'])
-			return $response;
+		$subscription_id = filter_var($subscription_id, FILTER_SANITIZE_NUMBER_INT);
+
+		if (empty($subscription_id)) {
+			return false;
+		}
+
+		$response = $this->api->request("subscriptions/" . $subscription_id, 'GET');
+
+		if (is_array($response) && !empty($response['subscription'])) {
+			return $response['subscription'];
+		}
 
 		return false;
   }

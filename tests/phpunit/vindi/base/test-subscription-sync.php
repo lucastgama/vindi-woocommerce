@@ -191,9 +191,14 @@ class Vindi_Test_Subscription_Sync extends Vindi_Test_Base
   /**
    * Executa um método privado do webhook e devolve o JSON enviado.
    */
-  private function call_webhook($method, $argument)
+  private function call_webhook($method, $argument, $helpers = null)
   {
     $webhooks = new VindiWebhooks($this->settings);
+    if (null !== $helpers) {
+      $property = new ReflectionProperty($webhooks, 'webhooksHelpers');
+      $property->setAccessible(true);
+      $property->setValue($webhooks, $helpers);
+    }
     $reflection = new ReflectionMethod($webhooks, $method);
     $reflection->setAccessible(true);
 
@@ -280,9 +285,66 @@ class Vindi_Test_Subscription_Sync extends Vindi_Test_Base
     $this->assertEquals(array('cancelled'), $this->subscription->status_updates);
   }
 
-  public function test_on_hold_awaiting_renewal_payment_is_not_sent_to_vindi()
+  /**
+   * O WCS coloca a assinatura em on-hold antes de criar o pedido de
+   * renovação: nesse momento o último pedido ainda é o anterior, já pago.
+   */
+  public function test_on_hold_during_renewal_is_not_sent_to_vindi()
   {
-    $this->subscription->last_order = new Vindi_Test_Fake_Order('pending');
+    $this->subscription->last_order = new Vindi_Test_Fake_Order('completed');
+    $this->routes->expects($this->never())->method('suspendSubscription');
+
+    $handler = new VindiSubscriptionStatusHandler($this->settings);
+    VindiSubscriptionStatusHandler::start_renewal(self::WC_SUBSCRIPTION_ID);
+    try {
+      $handler->filter_pre_status($this->subscription, 'on-hold', 'active');
+    } finally {
+      VindiSubscriptionStatusHandler::finish_renewal(self::WC_SUBSCRIPTION_ID);
+    }
+  }
+
+  /**
+   * "Criar pedido de renovação pendente" passa o objeto da assinatura.
+   */
+  public function test_on_hold_from_create_pending_renewal_is_not_sent_to_vindi()
+  {
+    $this->subscription->last_order = new Vindi_Test_Fake_Order('completed');
+    $this->routes->expects($this->never())->method('suspendSubscription');
+
+    $handler = new VindiSubscriptionStatusHandler($this->settings);
+    VindiSubscriptionStatusHandler::start_renewal($this->subscription);
+    try {
+      $handler->filter_pre_status($this->subscription, 'on-hold', 'active');
+    } finally {
+      VindiSubscriptionStatusHandler::finish_renewal($this->subscription);
+    }
+  }
+
+  public function test_subscription_reactivated_is_acknowledged_when_already_active()
+  {
+    $this->routes->method('hasPendingSubscriptionBills')->willReturn(false);
+
+    $response = $this->call_webhook('subscription_reactivated', $this->canceled_payload());
+
+    $this->assertEquals('A assinatura já está ativa.', $response['message']);
+    $this->assertEmpty($this->subscription->status_updates);
+  }
+
+  public function test_manual_on_hold_after_renewal_suspends_subscription_on_vindi()
+  {
+    $this->subscription->last_order = new Vindi_Test_Fake_Order('completed');
+    $this->routes->expects($this->once())->method('suspendSubscription');
+
+    $handler = new VindiSubscriptionStatusHandler($this->settings);
+    VindiSubscriptionStatusHandler::start_renewal(self::WC_SUBSCRIPTION_ID);
+    VindiSubscriptionStatusHandler::finish_renewal(self::WC_SUBSCRIPTION_ID);
+
+    $handler->filter_pre_status($this->subscription, 'on-hold', 'active');
+  }
+
+  public function test_on_hold_with_failed_renewal_order_is_not_sent_to_vindi()
+  {
+    $this->subscription->last_order = new Vindi_Test_Fake_Order('failed');
     $this->routes->expects($this->never())->method('suspendSubscription');
 
     $handler = new VindiSubscriptionStatusHandler($this->settings);
@@ -321,6 +383,29 @@ class Vindi_Test_Subscription_Sync extends Vindi_Test_Base
       $helpers->handle_trial_period('WC-' . self::WC_SUBSCRIPTION_ID)
     );
     $this->assertEmpty($this->subscription->status_updates);
+  }
+
+  /**
+   * A primeira fatura chega via bill_created depois que o checkout já criou
+   * o pedido do ciclo 1: não há nada a fazer e a Vindi não deve reenviar.
+   */
+  public function test_bill_created_for_existing_cycle_is_acknowledged()
+  {
+    $helpers = $this->createMock(WebhooksHelpers::class);
+    $helpers->method('renew_infos_array')->willReturn(array('wc_subscription_id' => 'WC-' . self::WC_SUBSCRIPTION_ID));
+    $helpers->method('handle_subscription_renewal')->willReturn(false);
+    $helpers->method('handle_trial_period')->willReturn(false);
+
+    $payload = json_decode(json_encode(array(
+      'bill' => array(
+        'id' => 1,
+        'subscription' => array('id' => self::VINDI_SUBSCRIPTION_ID, 'code' => 'WC-' . self::WC_SUBSCRIPTION_ID),
+      ),
+    )));
+
+    $response = $this->call_webhook('bill_created', $payload, $helpers);
+
+    $this->assertEquals('Fatura já processada para este ciclo.', $response['message']);
   }
 
   public function test_fee_product_is_reused_when_update_fails()

@@ -14,10 +14,33 @@ class VindiSubscriptionStatusHandler
      */
     private $routes;
 
+    /**
+     * IDs das assinaturas WC com renovação em andamento.
+     *
+     * @var array
+     */
+    private static $renewals_in_progress = array();
+
     public function __construct(VindiSettings $vindi_settings)
     {
         $this->vindi_settings = $vindi_settings;
         $this->routes = $vindi_settings->routes;
+
+        add_action('woocommerce_scheduled_subscription_payment', array(
+            __CLASS__, 'start_renewal',
+        ), 0);
+
+        add_action('woocommerce_scheduled_subscription_payment', array(
+            __CLASS__, 'finish_renewal',
+        ), PHP_INT_MAX);
+
+        add_action('woocommerce_order_action_wcs_create_pending_renewal', array(
+            __CLASS__, 'start_renewal',
+        ), 0);
+
+        add_action('woocommerce_order_action_wcs_create_pending_renewal', array(
+            __CLASS__, 'finish_renewal',
+        ), PHP_INT_MAX);
 
         add_action('woocommerce_subscription_status_cancelled', array(
             &$this, 'cancelled_status',
@@ -75,39 +98,99 @@ class VindiSubscriptionStatusHandler
      */
     private function handle_on_hold_status($wc_subscription)
     {
-        if (!$this->is_awaiting_payment_on_hold($wc_subscription)) {
-            $this->suspend_status($wc_subscription);
-            return;
-        }
-
         if (!$this->vindi_settings->get_synchronism_status()) {
             return;
         }
 
         $vindi_subscription_id = $this->get_vindi_subscription_id($wc_subscription);
+        $reason = $this->get_awaiting_payment_reason($wc_subscription);
+
+        if (null === $reason) {
+            $this->vindi_settings->logger->log(sprintf(
+                __('Status on-hold manual para a assinatura WC #%s (Vindi #%s). Suspendendo na Vindi.', VINDI),
+                $wc_subscription->get_id(),
+                $vindi_subscription_id ?: 'N/A'
+            ));
+            $this->suspend_status($wc_subscription);
+            return;
+        }
 
         $this->vindi_settings->logger->log(sprintf(
-            __('Status on-hold aguardando pagamento para a assinatura WC #%s (Vindi #%s). ' .
+            __('Status on-hold aguardando pagamento para a assinatura WC #%s (Vindi #%s): %s. ' .
                'Não propagando para a Vindi para evitar o cancelamento durante a renovação.', VINDI),
             $wc_subscription->get_id(),
-            $vindi_subscription_id ?: 'N/A'
+            $vindi_subscription_id ?: 'N/A',
+            $reason
         ));
     }
 
     /**
-     * Indica se o on-hold decorre de um pedido aguardando pagamento
-     * (renovação ou fim de trial), e não de uma suspensão manual.
+     * Marca o início de uma renovação da assinatura WC.
+     *
+     * @param int|WC_Subscription $subscription ID ou objeto da assinatura.
+     */
+    public static function start_renewal($subscription)
+    {
+        self::$renewals_in_progress[self::subscription_key($subscription)] = true;
+    }
+
+    /**
+     * Marca o fim de uma renovação da assinatura WC.
+     *
+     * @param int|WC_Subscription $subscription ID ou objeto da assinatura.
+     */
+    public static function finish_renewal($subscription)
+    {
+        unset(self::$renewals_in_progress[self::subscription_key($subscription)]);
+    }
+
+    /**
+     * @param int|WC_Subscription $subscription
+     * @return int
+     */
+    private static function subscription_key($subscription)
+    {
+        return (int) (is_object($subscription) ? $subscription->get_id() : $subscription);
+    }
+
+    /**
+     * Indica se o on-hold decorre de uma renovação em andamento ou de um
+     * pedido aguardando pagamento (renovação falha ou fim de trial), e não
+     * de uma suspensão manual.
      *
      * @param WC_Subscription $wc_subscription
      * @return bool
      */
     public function is_awaiting_payment_on_hold($wc_subscription)
     {
+        return null !== $this->get_awaiting_payment_reason($wc_subscription);
+    }
+
+    /**
+     * Motivo pelo qual o on-hold aguarda pagamento, ou null quando é manual.
+     *
+     * @param WC_Subscription $wc_subscription
+     * @return string|null
+     */
+    private function get_awaiting_payment_reason($wc_subscription)
+    {
+        if (isset(self::$renewals_in_progress[self::subscription_key($wc_subscription)])) {
+            return 'renovação em andamento';
+        }
+
         $last_order = $wc_subscription->get_last_order('all', array('parent', 'renewal'));
 
-        return is_object($last_order)
+        if (is_object($last_order)
             && method_exists($last_order, 'has_status')
-            && $last_order->has_status(array('pending', 'failed'));
+            && $last_order->has_status(array('pending', 'failed'))) {
+            return sprintf(
+                'último pedido #%s com status %s',
+                method_exists($last_order, 'get_id') ? $last_order->get_id() : '?',
+                method_exists($last_order, 'get_status') ? $last_order->get_status() : '?'
+            );
+        }
+
+        return null;
     }
 
     /**
