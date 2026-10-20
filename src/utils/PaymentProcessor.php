@@ -63,14 +63,6 @@ class VindiPaymentProcessor
     private $single_freight;
 
     /**
-     * Cache the Vindi product id for the generic "fee" item to avoid repeated lookups
-     * within the same request.
-     *
-     * @var int|null
-     */
-    private $fees_added = null;
-
-    /**
      * Payment Processor contructor.
      *
      * @param WC_Order $order The order to be processed
@@ -732,33 +724,6 @@ class VindiPaymentProcessor
         return (int) ($created['id'] ?? 0);
     }
 
-    /**
-     * Decide whether a built Vindi product_item is the recurring plan
-     * item (i.e. the one a one-cycle sign-up fee discount should attach
-     * to). It is the one carrying a real product_id and the
-     * `pricing_schema.schema_type = per_unit` marker; tax, shipping,
-     * interest, discount, fee, sign_up_fee and the SUF descriptor are
-     * excluded.
-     *
-     * @param array $item The candidate item to test.
-     *
-     * @return bool
-     */
-    protected function is_recurring_plan_item(array $item)
-    {
-        if (empty($item['product_id']) || in_array($item['product_id'], array('null', null, 0, '0'), true)) {
-            return false;
-        }
-        $type = isset($item['pricing_schema']['schema_type']) ? (string) $item['pricing_schema']['schema_type'] : '';
-        if ('per_unit' !== $type) {
-            return false;
-        }
-        if (isset($item['type']) && in_array($item['type'], array('tax', 'shipping', 'discount', 'interest_rate', 'sign_up_fee', 'sign_up_fee_discount', 'fee'), true)) {
-            return false;
-        }
-        return true;
-    }
-
     protected function calculate_discount($order_items)
     {
         $new_order_items = [];
@@ -917,32 +882,15 @@ class VindiPaymentProcessor
     }
 
     /**
-     * Create the sign-up fee item to be added to the bill.
-     *
-     * @param WC_Order_Item_Product[] $order_items. Array with all items to add
-     * the respective delivered value
-     *
-     * @return array
-     */
-    /**
      * Build the sign-up fee descriptor.
      *
-     * Historically this method returned a standalone Vindi `product_item`
-     * (the "[WC] Taxa de adesão" stub product). Pushing it as a separate
-     * item made Vindi sum the fee onto the recurring price in the first
-     * bill — turning "1st month R$ 9,90" into "1st month R$ 9,90 + recurring
-     * R$ 119,00" (ticket #DSP-…).
-     *
-     * The descriptor returned here is consumed by
-     * `build_product_items_for_subscription()` which translates it into a
-     * one-cycle `discounts` entry on the recurring `plan_item`. Net effect:
-     * the first bill carries the discounted amount (e.g. R$ 109,10), and
-     * every subsequent bill carries the regular price (R$ 119,00).
+     * The descriptor is consumed by `build_items()`, which turns it into a
+     * separate `product_item` ("[WC] Taxa de adesão" / WC-SUF) charged for a
+     * single cycle, so the fee only appears on the first bill.
      *
      * @param WC_Order_Item_Product[] $order_items The order items array.
      *
-     * @return array Empty array when there is no fee; otherwise a
-     *     descriptor consumed by `build_product_items_for_subscription()`.
+     * @return array|null Null when there is no fee; otherwise the descriptor.
      */
     protected function build_sign_up_fee_item($order_items)
     {
@@ -961,7 +909,6 @@ class VindiPaymentProcessor
                     'vindi_id'                => null,
                     'price'                   => (float) $sign_up_fee,
                     'qty'                     => isset($order_item['quantity']) ? (int) $order_item['quantity'] : 1,
-                    'discount_on_first_cycle' => (float) $sign_up_fee,
                 );
             }
         }
@@ -1059,7 +1006,6 @@ class VindiPaymentProcessor
         }
 
         $item = $this->create_fee_product();
-        $this->fees_added = !empty($item['id']) ? (int) $item['id'] : null;
 
         $fee_item = array(
             'type' => 'fee',
@@ -1090,28 +1036,36 @@ class VindiPaymentProcessor
     {
         $code   = 'wc-fee';
         $name   = 'Taxa adicional';
-        delete_transient('vindi_product_' . $code);
+        $transient_key = 'vindi_product_' . $code;
 
         $existing = $this->routes->findProductByCode($code);
 
         if ($existing && !empty($existing['id'])) {
             $current_type = $existing['pricing_schema']['schema_type'] ?? null;
-            if ($current_type !== 'flat') {
-                $updated = $this->routes->updateProduct($existing['id'], array(
-                    'name'           => $name,
-                    'code'           => $code,
-                    'status'         => 'active',
-                    'pricing_schema' => array(
-                        'price'       => 0,
-                        'schema_type' => 'flat',
-                    ),
-                ));
-                if (is_array($updated) && !empty($updated['id'])) {
-                    return $updated;
-                }
-            } else {
+            if ($current_type === 'flat') {
                 return $existing;
             }
+
+            $updated = $this->routes->updateProduct($existing['id'], array(
+                'name'           => $name,
+                'code'           => $code,
+                'status'         => 'active',
+                'pricing_schema' => array(
+                    'price'       => 0,
+                    'schema_type' => 'flat',
+                ),
+            ));
+            if (is_array($updated) && !empty($updated['id'])) {
+                set_transient($transient_key, $updated, HOUR_IN_SECONDS);
+                return $updated;
+            }
+
+            $this->logger->log(sprintf(
+                'Não foi possível atualizar o produto %s (#%s) na Vindi; utilizando o produto existente.',
+                $code,
+                $existing['id']
+            ));
+            return $existing;
         }
 
         $created = $this->routes->createProduct(array(
@@ -1184,7 +1138,6 @@ class VindiPaymentProcessor
                 $wc_subscription = VindiHelpers::get_matching_subscription($this->order, $order_item);
                 $shipping_method = $wc_subscription->get_shipping_method();
                 $get_total_shipping = $wc_subscription->get_total_shipping();
-                error_log('[Vindi] build_shipping_item - Subscription type: shipping_method="' . $shipping_method . '" total=' . $get_total_shipping);
             }
 
             if (!empty($shipping_method) && (float) $get_total_shipping > 0) {
@@ -1195,7 +1148,6 @@ class VindiPaymentProcessor
                     'price' => $get_total_shipping,
                     'qty' => 1,
                 );
-                error_log('[Vindi] build_shipping_item - Shipping item criado: vindi_id=' . $item['id'] . ' price=' . $get_total_shipping);
                 break;
             }
         }
@@ -1666,14 +1618,6 @@ class VindiPaymentProcessor
         }
         $wc_subscription->update_meta_data('vindi_billing_trigger_type', $trigger_type);
         $wc_subscription->save();
-    }
-
-    private function get_build_products($data, $order_item)
-    {
-        return array_merge(
-            $data['product_items'],
-            $this->build_product_items($order_item, 'subscription')
-        );
     }
 
     /**

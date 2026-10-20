@@ -151,7 +151,6 @@ class ProductsMetabox
         if ($period === 'year' && $installments > 12) {
             $installments = 12;
         }
-        error_log(var_export("interval: $interval, period: $period, installments: $installments", true));
         if ($period === 'month' && $installments > $interval) {
             $installments = $interval;
         }

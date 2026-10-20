@@ -63,15 +63,23 @@ class VindiSubscriptionStatusHandler
     }
 
     /**
-     * Trata mudanças para o status 'on-hold' sem propagar para a API.
-     * Como a Vindi não expõe endpoint de "pause", a única ação segura
-     * quando o status WC é `on-hold` é NÃO propagar para a Vindi. O
-     * cancelamento real continua sendo tratado no status `cancelled`.
+     * Trata mudanças para o status 'on-hold'.
+     *
+     * Durante a renovação o WooCommerce Subscriptions coloca a assinatura
+     * em on-hold até o pedido de renovação ser pago. Propagar esse estado
+     * cancelaria a assinatura na Vindi (DELETE) e o webhook
+     * subscription_canceled poderia chegar depois da reativação. Nesse caso
+     * o status não é propagado; a suspensão manual continua sendo enviada.
      *
      * @param WC_Subscription $wc_subscription
      */
     private function handle_on_hold_status($wc_subscription)
     {
+        if (!$this->is_awaiting_payment_on_hold($wc_subscription)) {
+            $this->suspend_status($wc_subscription);
+            return;
+        }
+
         if (!$this->vindi_settings->get_synchronism_status()) {
             return;
         }
@@ -79,12 +87,27 @@ class VindiSubscriptionStatusHandler
         $vindi_subscription_id = $this->get_vindi_subscription_id($wc_subscription);
 
         $this->vindi_settings->logger->log(sprintf(
-            __('Status on-hold recebido para a assinatura WC #%s (Vindi #%s). ' .
-               'Não propagando para a Vindi: o endpoint DELETE é permanente e ' .
-               'o estado on-hold é temporário (renovação/pausa).', VINDI),
+            __('Status on-hold aguardando pagamento para a assinatura WC #%s (Vindi #%s). ' .
+               'Não propagando para a Vindi para evitar o cancelamento durante a renovação.', VINDI),
             $wc_subscription->get_id(),
             $vindi_subscription_id ?: 'N/A'
         ));
+    }
+
+    /**
+     * Indica se o on-hold decorre de um pedido aguardando pagamento
+     * (renovação ou fim de trial), e não de uma suspensão manual.
+     *
+     * @param WC_Subscription $wc_subscription
+     * @return bool
+     */
+    public function is_awaiting_payment_on_hold($wc_subscription)
+    {
+        $last_order = $wc_subscription->get_last_order('all', array('parent', 'renewal'));
+
+        return is_object($last_order)
+            && method_exists($last_order, 'has_status')
+            && $last_order->has_status(array('pending', 'failed'));
     }
 
     /**

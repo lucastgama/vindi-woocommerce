@@ -7,11 +7,11 @@ Tags: vindi, cobrança-recorrente, vindi-woocommerce, assinaturas, woocommerce-s
 Author URI: https://vindi.com.br/ | https://mentores.com.br
 Author: Vindi | Mentores Digital
 Requires at least: 4.4
-Tested up to: 7.1.2
+Tested up to: 7.1
 WC requires at least: 3.0.0
 WC tested up to: 8.6.1
 Requires PHP: 5.6
-Stable Tag: 1.4.8
+Stable Tag: 1.4.9
 License: GPLv3
 License URI: http://www.gnu.org/licenses/gpl-3.0.html
 
@@ -39,6 +39,19 @@ Para dúvidas e suporte técnico, entre em contato com a equipe Vindi através d
 5. Configurações de pagamentos via cartão de crédito
 
 == Changelog ==
+= 1.4.9 - 16/10/2026 =
+- Lançamento da versão de patch.
+- **Correção:** Assinaturas não são mais canceladas na Vindi durante a renovação automática. Quando o WooCommerce Subscriptions coloca a assinatura "Em espera" aguardando o pagamento da renovação (ou do fim do período de teste), o status não é mais enviado para a Vindi. (Ticket #101648738)
+- **Correção:** A suspensão manual da assinatura, feita pelo lojista ou pelo cliente, continua sendo enviada para a Vindi, interrompendo novas cobranças.
+- **Correção:** O webhook `subscription_canceled` agora consulta o status atual da assinatura na Vindi antes de alterá-la no WooCommerce. Webhooks reentregues depois que a assinatura foi reativada são ignorados. (Ticket #101648738)
+- **Correção:** Quando a consulta à Vindi falha durante o processamento de `subscription_canceled`, o plugin responde HTTP 503 para que a Vindi reenvie o evento, evitando a perda de cancelamentos reais.
+- **Correção:** O webhook `bill_created` de assinaturas em período de teste com cobrança no fim do período passa a responder HTTP 200, evitando reentregas e erros desnecessários no log.
+- **Correção:** O produto de taxa adicional (`wc-fee`) volta a usar cache na consulta à Vindi e não é mais recriado quando a atualização falha, evitando o bloqueio do checkout.
+- **Melhoria:** Remoção de logs de depuração (`error_log`) que registravam dados do cadastro de planos e produtos.
+- **Melhoria:** Remoção de código sem uso e atualização da documentação interna da taxa de adesão.
+- **Melhoria:** Adição de testes automatizados para a sincronização de status de assinaturas entre WooCommerce e Vindi.
+- Compatibilidade testada até o WordPress 7.1.
+
 = 1.4.8 - 07/10/2026 =
 - **Correção:** Plugin não cancela mais a assinatura na Vindi durante renovações automáticas do WooCommerce Subscriptions. O estado `on-hold` é temporário e não deve disparar `DELETE /v1/subscriptions/{id}`. (Ticket #101648738)
 - **Correção:** Webhooks `subscription_canceled`, `bill_canceled`, `consent_revoked` e `consent_rejected` com `created_at` mais antigo que 30 minutos são descartados com HTTP 200 para a Vindi parar de reentregar. (Ticket #101648738)

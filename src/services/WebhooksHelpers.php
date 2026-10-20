@@ -8,6 +8,12 @@ use Exception;
 
 class WebhooksHelpers
 {
+    /**
+     * Retorno de handle_trial_period() quando o trial usa cobrança no fim
+     * do período: caso esperado, não deve gerar reentrega do webhook.
+     */
+    const TRIAL_END_OF_PERIOD = 'end_of_period';
+
     private $vindiWebhooks;
 
     public function __construct(VindiWebhooks $vindiWebhooks)
@@ -38,7 +44,7 @@ class WebhooksHelpers
         if ($endTrial > $now && $subscription->get_status() == "active") {
             $mirrored_trigger = $subscription->get_meta('vindi_billing_trigger_type', true);
             if ('end_of_period' === $mirrored_trigger) {
-                return false;
+                return self::TRIAL_END_OF_PERIOD;
             }
 
             $parentId = $subscription->get_parent_id();
