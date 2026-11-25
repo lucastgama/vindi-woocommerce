@@ -24,6 +24,7 @@ class CheckoutGateways
             'vindi-bolepix',
             'vindi-credit-card',
             'vindi-pix',
+            'vindi-pix-automatico',
         ];
 
         $isPaymentLink = filter_input(INPUT_GET, 'vindi-payment-link') ?? false;

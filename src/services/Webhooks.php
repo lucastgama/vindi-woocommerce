@@ -101,6 +101,190 @@ class VindiWebhooks
   }
 
     /**
+     * Process consent_created event from webhook (Pix Automático).
+     * Link de consentimento gerado — persistir para exibir ao cliente.
+     */
+    private function consent_created($data)
+    {
+        try {
+            $consent_url = $data->subscription->pix_automatic_consent_url ?? '';
+            $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_url'            => $consent_url,
+                'vindi_pix_automatic_consent_status'         => 'created',
+                'vindi_pix_automatic_consent_url_created_at' => time(),
+            ]);
+            return wp_send_json(['message' => 'Consent URL salvo.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_created', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_created.'], 500);
+        }
+    }
+
+    /**
+     * Process consent_awaiting_authorization event from webhook (Pix Automático).
+     * Cliente acessou o link no banco — atualizar status de espera.
+     */
+    private function consent_awaiting_authorization($data)
+    {
+        try {
+            $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_status' => 'in_progress',
+            ]);
+            return wp_send_json(['message' => 'Cliente acessou o link.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_awaiting_authorization', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_awaiting_authorization.'], 500);
+        }
+    }
+
+    /**
+     * Process consent_authorized event from webhook (Pix Automático).
+     * Cliente autorizou — ativar assinatura WC e registrar authorization_id.
+     */
+    private function consent_authorized($data)
+    {
+        try {
+            $authorization_id = $data->consent->authorization_id ?? '';
+            $wc_sub = $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_status'       => 'authorized',
+                'vindi_pix_automatic_authorization_id'      => $authorization_id,
+            ]);
+
+            $order = $wc_sub->get_parent();
+            if ($order && $order->has_status('on-hold')) {
+                $order->update_status(
+                    $this->vindi_settings->get_return_status(),
+                    __('Consentimento do Pix Automático autorizado no banco.', VINDI)
+                );
+            }
+            return wp_send_json(['message' => 'Consent autorizado.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_authorized', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_authorized.'], 500);
+        }
+    }
+
+    /**
+     * Process consent_rejected event from webhook (Pix Automático).
+     * Cliente rejeitou — registrar motivo e notificar merchant.
+     */
+    private function consent_rejected($data)
+    {
+        try {
+            $reason = $data->consent->rejection->reason->code ?? '';
+            $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_status'      => 'rejected',
+                'vindi_pix_automatic_rejection_reason'    => $reason,
+            ]);
+            return wp_send_json(['message' => 'Consent rejeitado.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_rejected', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_rejected.'], 500);
+        }
+    }
+
+    /**
+     * Process consent_expired event from webhook (Pix Automático).
+     * Link expirou após 60 minutos sem resposta.
+     */
+    private function consent_expired($data)
+    {
+        try {
+            $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_status' => 'expired',
+            ]);
+            return wp_send_json(['message' => 'Consent expirado.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_expired', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_expired.'], 500);
+        }
+    }
+
+    /**
+     * Process consent_revoked event from webhook (Pix Automático).
+     * Cliente revogou o consentimento no banco em momento posterior.
+     */
+    private function consent_revoked($data)
+    {
+        try {
+            $this->update_pix_automatic_consent_meta($data->subscription, [
+                'vindi_pix_automatic_consent_status' => 'revoked',
+            ]);
+            return wp_send_json(['message' => 'Consent revogado.'], 200);
+        } catch (\Exception $e) {
+            $this->handle_exception('consent_revoked', $e->getMessage(), $data->subscription->id ?? null);
+            return wp_send_json(['message' => 'Erro ao processar consent_revoked.'], 500);
+        }
+    }
+
+    /**
+     * Atualiza metadados do consentimento Pix Automático na assinatura WC e no
+     * pedido pai (lido pela tela "Visualizar pedido" em Minha Conta).
+     *
+     * @param object $vindi_subscription   Objeto subscription do payload do webhook.
+     * @param array  $meta_pairs           Mapa chave => valor para update_meta_data.
+     *
+     * @return \WC_Subscription
+     * @throws Exception Quando a assinatura WC não é encontrada.
+     */
+    private function update_pix_automatic_consent_meta($vindi_subscription, array $meta_pairs)
+    {
+        $wc_sub = $this->find_subscription_by_vindi_subscription($vindi_subscription);
+
+        foreach ($meta_pairs as $key => $value) {
+            $wc_sub->update_meta_data($key, $value);
+        }
+        $wc_sub->save();
+
+        $order = $wc_sub->get_parent();
+        if ($order) {
+            foreach ($meta_pairs as $key => $value) {
+                $order->update_meta_data($key, $value);
+            }
+            $order->save();
+        }
+
+        return $wc_sub;
+    }
+
+    /**
+     * Os eventos consent_* trazem apenas o id da assinatura na Vindi (sem o code "WC-x"),
+     * então a busca é pelo meta vindi_subscription_id gravado no checkout.
+     *
+     * @param object $vindi_subscription Objeto subscription do payload do webhook.
+     *
+     * @return \WC_Subscription
+     * @throws Exception
+     */
+    private function find_subscription_by_vindi_subscription($vindi_subscription)
+    {
+        $vindi_subscription_id = $vindi_subscription->id ?? null;
+
+        if (!empty($vindi_subscription_id)) {
+            $subscriptions = wc_get_orders(array(
+                'type'       => 'shop_subscription',
+                'status'     => 'any',
+                'limit'      => 1,
+                'meta_query' => array(
+                    array(
+                        'key'   => 'vindi_subscription_id',
+                        'value' => $vindi_subscription_id,
+                    ),
+                ),
+            ));
+            if (!empty($subscriptions)) {
+                return $subscriptions[0];
+            }
+        }
+
+        if (!empty($vindi_subscription->code)) {
+            return $this->find_subscription_by_id($vindi_subscription->code);
+        }
+
+        throw new Exception(sprintf(__('Assinatura Vindi #%s não encontrada!', VINDI), $vindi_subscription_id), 2);
+    }
+
+    /**
    * Process bill_created event from webhook
    * @param $data array
    */

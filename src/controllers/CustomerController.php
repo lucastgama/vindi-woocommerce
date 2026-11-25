@@ -50,19 +50,7 @@ class CustomerController
     $cpf_or_cnpj = null;
     $metadata = null;
 
-    $phones = [];
-    if ($customer->get_meta('billing_cellphone')) {
-      $phones[] = array(
-        'phone_type' => 'mobile',
-        'number' => preg_replace('/\D+/', '', '55' . $customer->get_meta('billing_cellphone'))
-      );
-    }
-    if ($customer->get_billing_phone()) {
-      $phones[] = array(
-        'phone_type' => 'landline',
-        'number' => preg_replace('/\D+/', '', '55' . $customer->get_billing_phone())
-      );
-    }
+    $phones = $this->build_phones($customer);
 
 
     if ($order && method_exists($order, 'needs_payment')) {
@@ -159,30 +147,7 @@ class CustomerController
     }
     $customer = new WC_Customer($user_id);
     $user = $customer->get_data();
-    $phones = $vindi_phones = [];
-    foreach ($vindiUser['phones'] as $phone) {
-      $vindi_phones[$phone['phone_type']] = $phone['id'];
-    }
-    if ($customer->get_meta('billing_cellphone')) {
-      $mobile = array(
-        'phone_type' => 'mobile',
-        'number' => preg_replace('/\D+/', '', '55' . $customer->get_meta('billing_cellphone'))
-      );
-      if (isset($vindi_phones['mobile'])) {
-        $mobile['id'] = $vindi_phones['mobile'];
-      }
-      $phones[] = $mobile;
-    }
-    if ($customer->get_billing_phone()) {
-      $landline = array(
-        'phone_type' => 'landline',
-        'number' => preg_replace('/\D+/', '', '55' . $customer->get_billing_phone())
-      );
-      if (isset($vindi_phones['landline'])) {
-        $landline['id'] = $vindi_phones['landline'];
-      }
-      $phones[] = $landline;
-    }
+    $phones = $this->build_phones($customer, $vindiUser['phones'] ?? []);
     $name = (!$user['first_name']) ? $user['display_name'] : $user['first_name'] . ' ' . $user['last_name'];
     $notes = null;
     $cpf_or_cnpj = null;
@@ -230,6 +195,76 @@ class CustomerController
       )
     );
     return $updatedUser;
+  }
+
+  /**
+   * Build the `phones` payload, reusing the ids of the phones the customer
+   * already has in Vindi.
+   *
+   * Vindi appends every phone sent without an `id`, and it may change the
+   * `phone_type` we send (a cellphone saved as billing phone comes back as
+   * "mobile"). Matching only by type left the phone without id on every
+   * checkout, piling up records until the "no máximo 3 registros" error.
+   * So the match is by number first and by type as a fallback.
+   *
+   * @param WC_Customer $customer
+   * @param array       $vindi_phones Phones returned by Vindi for the customer.
+   *
+   * @return array
+   */
+  private function build_phones($customer, $vindi_phones = [])
+  {
+    $candidates = array(
+      'mobile'   => $customer->get_meta('billing_cellphone'),
+      'landline' => $customer->get_billing_phone(),
+    );
+
+    $phones = [];
+    $used_ids = [];
+    foreach ($candidates as $type => $raw) {
+      if (!$raw) {
+        continue;
+      }
+
+      $number = preg_replace('/\D+/', '', '55' . $raw);
+      if (in_array($number, array_column($phones, 'number'), true)) {
+        continue;
+      }
+
+      $phone = array(
+        'phone_type' => $type,
+        'number'     => $number,
+      );
+
+      $id = $this->find_vindi_phone_id($vindi_phones, 'number', $number, $used_ids)
+        ?: $this->find_vindi_phone_id($vindi_phones, 'phone_type', $type, $used_ids);
+      if ($id) {
+        $phone['id'] = $id;
+        $used_ids[] = $id;
+      }
+
+      $phones[] = $phone;
+    }
+
+    return $phones;
+  }
+
+  private function find_vindi_phone_id($vindi_phones, $field, $value, $used_ids)
+  {
+    foreach ((array) $vindi_phones as $vindi_phone) {
+      if (empty($vindi_phone['id']) || in_array($vindi_phone['id'], $used_ids, true)) {
+        continue;
+      }
+      $current = (string) ($vindi_phone[$field] ?? '');
+      if ('number' === $field) {
+        $current = preg_replace('/\D+/', '', $current);
+      }
+      if ($current === (string) $value) {
+        return $vindi_phone['id'];
+      }
+    }
+
+    return null;
   }
 
   /**

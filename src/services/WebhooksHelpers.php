@@ -11,6 +11,10 @@ class WebhooksHelpers
     /**
      * Retorno de handle_trial_period() quando o trial usa cobrança no fim
      * do período: caso esperado, não deve gerar reentrega do webhook.
+     *
+     * Legado: só vale para assinaturas criadas quando o plugin colocava o
+     * plano em `end_of_period` (meta `vindi_billing_trigger_type`). Hoje o
+     * trial é enviado como `start_at` na assinatura da Vindi.
      */
     const TRIAL_END_OF_PERIOD = 'end_of_period';
 
@@ -101,6 +105,8 @@ class WebhooksHelpers
           'pix_expiration' => $gateway_fields->max_days_to_keep_waiting_payment ?? null,
           'pix_code' => $gateway_fields->qrcode_original_path ?? null,
           'pix_qr' => $gateway_fields->qrcode_path ?? null,
+          'pix_automatic_consent_url' => $data->bill->subscription->pix_automatic_consent_url ?? null,
+          'consent_status' => $data->bill->subscription->consent_status ?? null,
         ];
     }
 

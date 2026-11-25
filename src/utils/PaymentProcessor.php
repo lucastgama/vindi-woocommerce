@@ -217,6 +217,9 @@ class VindiPaymentProcessor
             case 'bolepix':
                 $code = 'pix_bank_slip';
                 break;
+            case 'pix_automatic':
+                $code = 'pix_automatic';
+                break;
             default:
                 $code = $this->gateway->type();
                 break;
@@ -285,10 +288,11 @@ class VindiPaymentProcessor
         $payment_method = filter_input(INPUT_POST, 'payment_method');
 
         $payment_methods = [
-            'vindi-credit-card' => $this->change_payment_to_credit_card(),
-            'vindi-bank-slip'   => ["payment_method_code" => "bank_slip"],
-            'vindi-pix'         => ["payment_method_code" => "pix"],
-            'vindi-bolepix'     => ["payment_method_code" => "pix_bank_slip"],
+            'vindi-credit-card'    => $this->change_payment_to_credit_card(),
+            'vindi-bank-slip'      => ["payment_method_code" => "bank_slip"],
+            'vindi-pix'            => ["payment_method_code" => "pix"],
+            'vindi-bolepix'        => ["payment_method_code" => "pix_bank_slip"],
+            'vindi-pix-automatico' => ["payment_method_code" => "pix_automatic"],
         ];
 
         if (!isset($payment_methods[$payment_method])) {
@@ -406,10 +410,13 @@ class VindiPaymentProcessor
                 array_push($subscriptions_ids, $subscription_id);
                 array_push($wc_subscriptions_ids, $wc_subscription_id);
                 $subscription_bill = $subscription['bill'];
-                $order_post_meta[$subscription_id]['cycle'] = $subscription['current_period']['cycle'];
+                // Com trial (start_at no futuro) a Vindi ainda não tem período nem fatura.
+                $order_post_meta[$subscription_id]['cycle'] = $subscription['current_period']['cycle'] ?? null;
                 $order_post_meta[$subscription_id]['product'] = $subscription_order_item->get_product()->get_name();
                 $order_post_meta[$subscription_id]['bill'] = $this->create_bill_meta_for_order($subscription_bill);
-                $bills[] = $subscription['bill'];
+                if (!empty($subscription_bill)) {
+                    $bills[] = $subscription_bill;
+                }
                 $message = $this->cancel_if_denied_bill_status($subscription['bill']);
                 if ($message) {
                     throw new Exception($message);
@@ -418,6 +425,12 @@ class VindiPaymentProcessor
                 $subscription_obj = wcs_get_subscription($wc_subscription_id);
                 if ($subscription_obj && is_a($subscription_obj, 'WC_Subscription')) {
                     $subscription_obj->update_meta_data('vindi_subscription_id', $subscription_id);
+                    // Pix Automático: espelhar consent_url e status na assinatura WC
+                    if (!empty($subscription['pix_automatic_consent_url'])) {
+                        $subscription_obj->update_meta_data('vindi_pix_automatic_consent_url', $subscription['pix_automatic_consent_url']);
+                        $subscription_obj->update_meta_data('vindi_pix_automatic_consent_status', 'created');
+                        $subscription_obj->update_meta_data('vindi_pix_automatic_consent_url_created_at', time());
+                    }
                     $subscription_obj->save();
                 }
 
@@ -1507,9 +1520,23 @@ class VindiPaymentProcessor
         $product = $order_item->get_product();
         if ($this->is_subscription_type($product) || $this->is_variable($product)) {
             $data['plan_id'] = $this->get_plan_from_order_item($order_item);
-            $wc_subscription_id = VindiHelpers::get_matching_subscription($this->order, $order_item)->id;
+            $wc_subscription = VindiHelpers::get_matching_subscription($this->order, $order_item);
+            $wc_subscription_id = $wc_subscription->id;
             $data['code'] = strpos($wc_subscription_id, 'WC') > 0 ? $wc_subscription_id : 'WC-' . $wc_subscription_id;
-            $this->sync_plan_trial_settings($order_item, $data['plan_id'], $wc_subscription_id);
+            $this->normalize_plan_billing_trigger($data['plan_id']);
+
+            $start_at = $this->get_trial_start_at($wc_subscription);
+            if ($start_at) {
+                $data['start_at'] = $start_at;
+            }
+        }
+
+        // Pix Automático exige billing_trigger_type=beginning_of_period e start_at (regra D-2).
+        // O start_at do Pix Automático já considera o trial e substitui o calculado acima.
+        if ('pix_automatic' === $this->payment_method_code()) {
+            $this->validate_pix_automatic_periodicity($order_item);
+            $data['billing_trigger_type'] = 'beginning_of_period';
+            $data['start_at'] = $this->calculate_pix_automatic_start_at($order_item, $wc_subscription_id ?? 0);
         }
 
         $data['product_items'] = $this->build_product_items($order_item, 'subscription');
@@ -1520,6 +1547,13 @@ class VindiPaymentProcessor
         }
         $subscription['wc_id'] = $wc_subscription_id;
 
+        if (!empty($subscription['pix_automatic_consent_url'])) {
+            $this->order->update_meta_data('vindi_pix_automatic_consent_url', $subscription['pix_automatic_consent_url']);
+            $this->order->update_meta_data('vindi_pix_automatic_consent_status', 'created');
+            $this->order->update_meta_data('vindi_pix_automatic_consent_url_created_at', time());
+            $this->order->save();
+        }
+
         if (isset($subscription['bill']['id'])) {
             $this->order->update_meta_data('vindi_bill_id', $subscription['bill']['id']);
             $this->order->save();
@@ -1528,27 +1562,93 @@ class VindiPaymentProcessor
     }
 
     /**
-     * Push the trial configuration of the WooCommerce order item to the
-     * matching Vindi plan, so a checkout honours the trial even when the
-     * plan was created under the old `beginning_of_period` defaults.
-     *
-     * The mirror meta `vindi_billing_trigger_type` on the WC
-     * subscription is also refreshed with the value Vindi accepted, so
-     * later webhook handlers (WebhooksHelpers::handle_trial_period)
-     * make decisions based on ground truth instead of guesses.
-     *
-     * @param WC_Order_Item_Product $order_item        The subscription line item.
-     * @param int|string            $plan_id           The Vindi plan id.
-     * @param int                   $wc_subscription_id Optional. The matching WC subscription id.
+     * Valida que o produto tem periodicidade suportada pelo Pix Automático.
+     * Aceita apenas mensal ou semanal (mínimo 7 dias).
      */
-    private function sync_plan_trial_settings($order_item, $plan_id, $wc_subscription_id = 0)
+    protected function validate_pix_automatic_periodicity($order_item)
     {
-        if (empty($plan_id)) {
-            return;
+        $product = $order_item->get_product();
+        $period  = $product->get_meta('_subscription_period', true);
+        $interval = (int) $product->get_meta('_subscription_period_interval', true);
+
+        $is_monthly = ('month' === $period && $interval >= 1);
+        $is_weekly  = ('week' === $period && $interval >= 1);
+
+        if (!$is_monthly && !$is_weekly) {
+            $this->abort(
+                __('Pix Automático aceita apenas periodicidade mensal ou semanal.', VINDI),
+                true
+            );
+        }
+    }
+
+    /**
+     * Calcula o start_at para Pix Automático.
+     * Cenário A (cobrança imediata): data de hoje.
+     * Cenário B (agendamento futuro): meta _pix_automatic_start_at no produto (D-2 do vencimento desejado).
+     * Cenário B com trial: D-2 do fim do período de teste da assinatura WC, para a
+     * primeira cobrança vencer no dia em que o trial termina.
+     */
+    protected function calculate_pix_automatic_start_at($order_item, $wc_subscription_id = 0)
+    {
+        $product = $order_item->get_product();
+        $custom_start = $product->get_meta('_pix_automatic_start_at', true);
+
+        if (!empty($custom_start)) {
+            return $custom_start;
         }
 
-        $product = $order_item->get_product();
-        if (!$product || !$this->is_subscription_type($product)) {
+        $timezone = new \DateTimeZone('America/Sao_Paulo');
+        $today = new \DateTime('now', $timezone);
+
+        $wc_subscription = $wc_subscription_id ? wcs_get_subscription($wc_subscription_id) : false;
+        $trial_end = $wc_subscription ? $wc_subscription->get_time('trial_end') : 0;
+        if ($trial_end > 0) {
+            $start_at = (new \DateTime('@' . $trial_end))->setTimezone($timezone)->modify('-2 days');
+            if ($start_at->format('Y-m-d') > $today->format('Y-m-d')) {
+                return $start_at->format('Y-m-d');
+            }
+        }
+
+        return $today->format('Y-m-d');
+    }
+
+    /**
+     * Start date of the Vindi subscription when the WC subscription has a
+     * trial: the first period (and its bill) only begins when the trial
+     * ends, matching the next payment date WooCommerce shows.
+     *
+     * @param WC_Subscription|null $wc_subscription
+     *
+     * @return string|null ISO 8601 date, or null when there is no trial.
+     */
+    private function get_trial_start_at($wc_subscription)
+    {
+        if (!$wc_subscription || !is_a($wc_subscription, 'WC_Subscription')) {
+            return null;
+        }
+
+        $trial_end = (int) $wc_subscription->get_time('trial_end');
+        if ($trial_end <= time()) {
+            return null;
+        }
+
+        return wp_date('Y-m-d\TH:i:sP', $trial_end);
+    }
+
+    /**
+     * Keep the Vindi plan as prepaid (`beginning_of_period`, day 0).
+     *
+     * The trial is handled per subscription through `start_at`. Plans
+     * changed by older versions of the plugin to `end_of_period` (or
+     * with a trigger day offset) pushed the first charge one whole
+     * period after the trial, so they are reverted here.
+     *
+     * @param int|string $plan_id The Vindi plan id.
+     */
+    private function normalize_plan_billing_trigger($plan_id)
+    {
+        if (empty($plan_id)) {
             return;
         }
 
@@ -1557,26 +1657,20 @@ class VindiPaymentProcessor
             return;
         }
 
-        $trial_length = (int) $product->get_meta('_subscription_trial_length');
-        $trial_period = (string) ($product->get_meta('_subscription_trial_period') ?: 'day');
-        $trigger_type = $trial_length > 0 ? 'end_of_period' : 'beginning_of_period';
-        $trigger_day  = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
-
         if (
-            isset($current['billing_trigger_type'], $current['billing_trigger_day'])
-            && $current['billing_trigger_type'] === $trigger_type
-            && (int) $current['billing_trigger_day'] === (int) $trigger_day
+            isset($current['billing_trigger_type'])
+            && $current['billing_trigger_type'] === 'beginning_of_period'
+            && (int) ($current['billing_trigger_day'] ?? 0) === 0
         ) {
-            $this->mirror_billing_trigger_type($wc_subscription_id, $current['billing_trigger_type']);
             return;
         }
 
         $payload = array(
-            'name'                 => $current['name'] ?? '[WC] ' . $product->get_name(),
+            'name'                 => $current['name'] ?? null,
             'interval'             => $current['interval'] ?? 'months',
             'interval_count'       => isset($current['interval_count']) ? (int) $current['interval_count'] : 1,
-            'billing_trigger_type' => $trigger_type,
-            'billing_trigger_day'  => (int) $trigger_day,
+            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_day'  => 0,
             'code'                 => $current['code'] ?? null,
             'installments'         => isset($current['installments']) ? (int) $current['installments'] : 1,
             'status'               => $current['status'] ?? 'active',
@@ -1589,35 +1683,11 @@ class VindiPaymentProcessor
         $updated = $this->routes->updatePlan($plan_id, $payload);
         if (!$updated || !isset($updated['id'])) {
             $this->logger->log(sprintf(
-                'Falha ao sincronizar billing_trigger do plano %s para o pedido %s.',
+                'Falha ao normalizar billing_trigger do plano %s para o pedido %s.',
                 $plan_id,
                 $this->order->get_id()
             ));
-            return;
         }
-
-        $this->mirror_billing_trigger_type($wc_subscription_id, $trigger_type);
-    }
-
-    /**
-     * Persist the billing_trigger_type that Vindi will use for this
-     * subscription, so webhooks can read it via
-     * `$subscription->get_meta('vindi_billing_trigger_type', true)`.
-     *
-     * @param int    $wc_subscription_id The WC subscription id (0 to skip).
-     * @param string $trigger_type       Either "end_of_period" or "beginning_of_period".
-     */
-    private function mirror_billing_trigger_type($wc_subscription_id, $trigger_type)
-    {
-        if (empty($wc_subscription_id)) {
-            return;
-        }
-        $wc_subscription = wcs_get_subscription($wc_subscription_id);
-        if (!$wc_subscription || !is_a($wc_subscription, 'WC_Subscription')) {
-            return;
-        }
-        $wc_subscription->update_meta_data('vindi_billing_trigger_type', $trigger_type);
-        $wc_subscription->save();
     }
 
     /**
@@ -1697,8 +1767,8 @@ class VindiPaymentProcessor
     protected function create_bill_meta_for_order($bill)
     {
         $bill_meta = [];
-        $bill_meta['id'] = $bill['id'];
-        $bill_meta['status'] = $bill['status'];
+        $bill_meta['id'] = $bill['id'] ?? null;
+        $bill_meta['status'] = $bill['status'] ?? null;
         $bill_meta['payment_method'] = $this->payment_method_code();
 
         if (isset($bill['charges']) && count($bill['charges'])) {
@@ -1732,6 +1802,13 @@ class VindiPaymentProcessor
                 $bill_meta['pix_expiration'] = $transaction['max_days_to_keep_waiting_payment'] ?? '';
                 $bill_meta['pix_code'] = $transaction['qrcode_original_path'] ?? '';
                 $bill_meta['pix_qr'] = $transaction['qrcode_path'] ?? '';
+            }
+
+            if ('pix_automatic' === $this->payment_method_code()) {
+                $bill_meta['pix_automatic_consent_url'] = $bill['pix_automatic_consent_url']
+                    ?? ($charges['pix_automatic_consent_url'] ?? '');
+                $bill_meta['consent_status'] = $bill['consent_status']
+                    ?? ($charges['consent_status'] ?? 'created');
             }
         }
         return $bill_meta;
@@ -1945,6 +2022,11 @@ class VindiPaymentProcessor
         if ($this->order_has_trial()) {
             $status = $this->vindi_settings->get_return_status();
             $status_message = __('Aguardando pagamento do pedido.', VINDI);
+
+            if ('pix_automatic' === $this->payment_method_code()) {
+                $status = 'on-hold';
+                $status_message = __('Aguardando autorização do Pix Automático no banco.', VINDI);
+            }
         }
         $this->order->update_status($status, $status_message);
     }

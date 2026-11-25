@@ -178,6 +178,12 @@ class VindiSubscriptionStatusHandler
             return 'renovação em andamento';
         }
 
+        if (method_exists($wc_subscription, 'get_payment_method')
+            && 'vindi-pix-automatico' === $wc_subscription->get_payment_method()
+            && 'authorized' !== $wc_subscription->get_meta('vindi_pix_automatic_consent_status', true)) {
+            return 'aguardando consentimento do Pix Automático';
+        }
+
         $last_order = $wc_subscription->get_last_order('all', array('parent', 'renewal'));
 
         if (is_object($last_order)

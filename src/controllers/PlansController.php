@@ -50,7 +50,7 @@ class PlansController
   }
 
   /**
-   * Re-sync the Vindi plan whenever a trial field changes on a
+   * Re-sync the Vindi plan whenever a billing period field changes on a
    * subscription (or a subscription variation) that already has a
    * `vindi_plan_id` mapped to it.
    *
@@ -62,8 +62,6 @@ class PlansController
   public function onTrialMetaChanged($meta_id, $object_id, $meta_key, $meta_value)
   {
     $tracked = array(
-      '_subscription_trial_length',
-      '_subscription_trial_period',
       '_subscription_period',
       '_subscription_period_interval',
       '_subscription_length',
@@ -96,7 +94,7 @@ class PlansController
    *     calculations if available.
    *  3. get_meta() direct read.
    *
-   * @return array{interval_type:string,interval_count:int,subscription_length:int,trial_length:int,trial_period:string}
+   * @return array{interval_type:string,interval_count:int,subscription_length:int}
    */
   private function readSubscriptionMeta($product, $product_id)
   {
@@ -105,8 +103,6 @@ class PlansController
         'interval_type'       => sanitize_text_field(wp_unslash($_POST['_subscription_period'] ?? 'month')),
         'interval_count'      => (int) ($_POST['_subscription_period_interval'] ?? 1),
         'subscription_length' => (int) ($_POST['_subscription_length'] ?? 0),
-        'trial_length'        => (int) ($_POST['_subscription_trial_length'] ?? 0),
-        'trial_period'        => sanitize_text_field(wp_unslash($_POST['_subscription_trial_period'] ?? 'day')),
       );
     }
 
@@ -115,8 +111,6 @@ class PlansController
         'interval_type'       => (string) \WC_Subscriptions_Product::get_period($product),
         'interval_count'      => (int) \WC_Subscriptions_Product::get_interval($product),
         'subscription_length' => (int) \WC_Subscriptions_Product::get_length($product),
-        'trial_length'        => (int) \WC_Subscriptions_Product::get_trial_length($product),
-        'trial_period'        => (string) \WC_Subscriptions_Product::get_trial_period($product),
       );
     }
 
@@ -124,32 +118,7 @@ class PlansController
       'interval_type'       => (string) ($product->get_meta('_subscription_period') ?: 'month'),
       'interval_count'      => (int) ($product->get_meta('_subscription_period_interval') ?: 1),
       'subscription_length' => (int) $product->get_meta('_subscription_length'),
-      'trial_length'        => (int) $product->get_meta('_subscription_trial_length'),
-      'trial_period'        => (string) ($product->get_meta('_subscription_trial_period') ?: 'day'),
     );
-  }
-
-  /**
-   * Pick the Vindi `billing_trigger_type` that honours the WooCommerce
-   * subscription trial configuration.
-   *
-   * Vindi ignores `billing_trigger_day` when `billing_trigger_type` is
-   * `beginning_of_period`, so the trial of N days/months gets converted
-   * into a same-day charge instead of a deferred first bill. That is why
-   * a "1º mês por R$ 9,90" promotion was being invoiced in full on the
-   * day of purchase.
-   *
-   * Returning `end_of_period` when a trial exists makes Vindi hold the
-   * first charge for `billing_trigger_day` and aligns the plugin's
-   * behaviour with the customer's expectation of a free trial window.
-   *
-   * @param int $trial_length WooCommerce `_subscription_trial_length`.
-   *
-   * @return string Either "end_of_period" (trial) or "beginning_of_period".
-   */
-  private function resolve_billing_trigger_type($trial_length)
-  {
-    return ((int) $trial_length) > 0 ? 'end_of_period' : 'beginning_of_period';
   }
 
   function onNewProduct($product_id, $product)
@@ -284,18 +253,12 @@ class PlansController
         $interval_type       = $meta['interval_type'];
         $interval_count      = $meta['interval_count'];
         $subscription_length = $meta['subscription_length'];
-        $trial_length        = $meta['trial_length'];
-        $trial_period        = $meta['trial_period'];
 
         $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
         if (!is_array($plan_interval)) {
           continue;
         }
 
-        $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
-        if ($trigger_day === false) {
-          $trigger_day = 0;
-        }
 
         $variation_id      = $variation['variation_id'];
 
@@ -344,8 +307,8 @@ class PlansController
             'name' => VINDI_PREFIX_PLAN . $data['name'],
             'interval' => $plan_interval['interval'],
             'interval_count' => $plan_interval['interval_count'],
-            'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
-            'billing_trigger_day' => $trigger_day,
+            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_day' => 0,
             'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
             'code' => 'WC-' . $data['id'],
             'installments' => $plan_installments,
@@ -400,8 +363,6 @@ class PlansController
     $interval_type       = $meta['interval_type'];
     $interval_count      = $meta['interval_count'];
     $subscription_length = $meta['subscription_length'];
-    $trial_length        = $meta['trial_length'];
-    $trial_period        = $meta['trial_period'];
 
     $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
     if (!is_array($plan_interval)) {
@@ -409,10 +370,6 @@ class PlansController
       return;
     }
 
-    $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
-    if ($trigger_day === false) {
-      $trigger_day = 0;
-    }
 
 
     $plan_installments = $product->get_meta("vindi_max_credit_installments_$product_id");
@@ -442,8 +399,8 @@ class PlansController
       'name' => VINDI_PREFIX_PLAN . $data['name'],
       'interval' => $plan_interval['interval'],
       'interval_count' => $plan_interval['interval_count'],
-      'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
-      'billing_trigger_day' => $trigger_day,
+      'billing_trigger_type' => 'beginning_of_period',
+      'billing_trigger_day' => 0,
       'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
       'code' => 'WC-' . $data['id'],
       'installments' => $plan_installments,
@@ -525,18 +482,12 @@ class PlansController
         $interval_type       = $meta['interval_type'];
         $interval_count      = $meta['interval_count'];
         $subscription_length = $meta['subscription_length'];
-        $trial_length        = $meta['trial_length'];
-        $trial_period        = $meta['trial_period'];
 
         $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
         if (!is_array($plan_interval)) {
           continue;
         }
 
-        $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
-        if ($trigger_day === false) {
-          $trigger_day = 0;
-        }
 
         $variation_id      = $variation['variation_id'];
 
@@ -568,8 +519,8 @@ class PlansController
             'name' => VINDI_PREFIX_PLAN . $data['name'],
             'interval' => $plan_interval['interval'],
             'interval_count' => $plan_interval['interval_count'],
-            'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
-            'billing_trigger_day' => $trigger_day,
+            'billing_trigger_type' => 'beginning_of_period',
+            'billing_trigger_day' => 0,
             'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
             'code' => 'WC-' . $data['id'],
             'installments' => $plan_installments,
@@ -593,8 +544,6 @@ class PlansController
     $interval_type       = $meta['interval_type'];
     $interval_count      = $meta['interval_count'];
     $subscription_length = $meta['subscription_length'];
-    $trial_length        = $meta['trial_length'];
-    $trial_period        = $meta['trial_period'];
 
     $plan_interval = VindiConversions::convert_interval($interval_count, $interval_type);
     if (!is_array($plan_interval)) {
@@ -602,10 +551,6 @@ class PlansController
       return;
     }
 
-    $trigger_day = VindiConversions::convertTriggerToDay($trial_length, $trial_period);
-    if ($trigger_day === false) {
-      $trigger_day = 0;
-    }
 
     $vindi_product_id = $product->get_meta('vindi_product_id', true);
 
@@ -637,8 +582,8 @@ class PlansController
         'name' => VINDI_PREFIX_PLAN . $data['name'],
         'interval' => $plan_interval['interval'],
         'interval_count' => $plan_interval['interval_count'],
-        'billing_trigger_type' => $this->resolve_billing_trigger_type($trial_length),
-        'billing_trigger_day' => $trigger_day,
+        'billing_trigger_type' => 'beginning_of_period',
+        'billing_trigger_day' => 0,
         'billing_cycles' => ($subscription_length == 0) ? null : $subscription_length,
         'code' => 'WC-' . $data['id'],
         'installments' => $plan_installments,

@@ -180,6 +180,7 @@ class WcVindiPayment extends AbstractInstance
         require_once plugin_dir_path(__FILE__) . '/includes/gateways/BankSlipPayment.php';
         require_once plugin_dir_path(__FILE__) . '/includes/gateways/PixPayment.php';
         require_once plugin_dir_path(__FILE__) . '/includes/gateways/BolepixPayment.php';
+        require_once plugin_dir_path(__FILE__) . '/includes/gateways/PixAutomaticoPayment.php';
 
         require_once plugin_dir_path(__FILE__) . '/utils/SubscriptionStatusHandler.php';
         require_once plugin_dir_path(__FILE__) . '/utils/InterestPriceHandler.php';
@@ -223,6 +224,7 @@ class WcVindiPayment extends AbstractInstance
         $methods[] = new VindiBankSlipGateway($this->settings, $this->controllers);
         $methods[] = new VindiPixGateway($this->settings, $this->controllers);
         $methods[] = new VindiBolepixGateway($this->settings, $this->controllers);
+        $methods[] = new VindiPixAutomaticoGateway($this->settings, $this->controllers);
 
         return $methods;
     }
