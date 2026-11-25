@@ -104,18 +104,44 @@ class VindiWebhooks
      * Process consent_created event from webhook (Pix Automático).
      * Link de consentimento gerado — persistir para exibir ao cliente.
      */
+    private function consent_subscription($data)
+    {
+        $subscription = isset($data->subscription) && is_object($data->subscription)
+            ? clone $data->subscription
+            : new \stdClass();
+        $consent = $data->consent ?? null;
+
+        if (empty($subscription->id) && !empty($consent->subscription_id)) {
+            $subscription->id = $consent->subscription_id;
+        }
+        if (empty($subscription->pix_automatic_consent_url) && !empty($consent->link_url)) {
+            $subscription->pix_automatic_consent_url = $consent->link_url;
+        }
+
+        return $subscription;
+    }
+
+    /**
+     * Process consent_in_progress event (nome usado pela Vindi para o cliente no app do banco).
+     */
+    private function consent_in_progress($data)
+    {
+        return $this->consent_awaiting_authorization($data);
+    }
+
     private function consent_created($data)
     {
         try {
-            $consent_url = $data->subscription->pix_automatic_consent_url ?? '';
-            $this->update_pix_automatic_consent_meta($data->subscription, [
+            $subscription = $this->consent_subscription($data);
+            $consent_url = $subscription->pix_automatic_consent_url ?? '';
+            $this->update_pix_automatic_consent_meta($subscription, [
                 'vindi_pix_automatic_consent_url'            => $consent_url,
                 'vindi_pix_automatic_consent_status'         => 'created',
                 'vindi_pix_automatic_consent_url_created_at' => time(),
             ]);
             return wp_send_json(['message' => 'Consent URL salvo.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_created', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_created', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_created.'], 500);
         }
     }
@@ -127,12 +153,12 @@ class VindiWebhooks
     private function consent_awaiting_authorization($data)
     {
         try {
-            $this->update_pix_automatic_consent_meta($data->subscription, [
+            $this->update_pix_automatic_consent_meta($this->consent_subscription($data), [
                 'vindi_pix_automatic_consent_status' => 'in_progress',
             ]);
             return wp_send_json(['message' => 'Cliente acessou o link.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_awaiting_authorization', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_awaiting_authorization', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_awaiting_authorization.'], 500);
         }
     }
@@ -144,8 +170,8 @@ class VindiWebhooks
     private function consent_authorized($data)
     {
         try {
-            $authorization_id = $data->consent->authorization_id ?? '';
-            $wc_sub = $this->update_pix_automatic_consent_meta($data->subscription, [
+            $authorization_id = $data->consent->authorization_id ?? ($data->consent->consent_id ?? '');
+            $wc_sub = $this->update_pix_automatic_consent_meta($this->consent_subscription($data), [
                 'vindi_pix_automatic_consent_status'       => 'authorized',
                 'vindi_pix_automatic_authorization_id'      => $authorization_id,
             ]);
@@ -159,7 +185,7 @@ class VindiWebhooks
             }
             return wp_send_json(['message' => 'Consent autorizado.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_authorized', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_authorized', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_authorized.'], 500);
         }
     }
@@ -171,14 +197,17 @@ class VindiWebhooks
     private function consent_rejected($data)
     {
         try {
-            $reason = $data->consent->rejection->reason->code ?? '';
-            $this->update_pix_automatic_consent_meta($data->subscription, [
+            $reason = $data->consent->rejection->reason->code
+                ?? $data->consent->reason->code
+                ?? $data->consent->rejection_reason
+                ?? '';
+            $this->update_pix_automatic_consent_meta($this->consent_subscription($data), [
                 'vindi_pix_automatic_consent_status'      => 'rejected',
                 'vindi_pix_automatic_rejection_reason'    => $reason,
             ]);
             return wp_send_json(['message' => 'Consent rejeitado.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_rejected', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_rejected', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_rejected.'], 500);
         }
     }
@@ -190,12 +219,12 @@ class VindiWebhooks
     private function consent_expired($data)
     {
         try {
-            $this->update_pix_automatic_consent_meta($data->subscription, [
+            $this->update_pix_automatic_consent_meta($this->consent_subscription($data), [
                 'vindi_pix_automatic_consent_status' => 'expired',
             ]);
             return wp_send_json(['message' => 'Consent expirado.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_expired', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_expired', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_expired.'], 500);
         }
     }
@@ -207,12 +236,12 @@ class VindiWebhooks
     private function consent_revoked($data)
     {
         try {
-            $this->update_pix_automatic_consent_meta($data->subscription, [
+            $this->update_pix_automatic_consent_meta($this->consent_subscription($data), [
                 'vindi_pix_automatic_consent_status' => 'revoked',
             ]);
             return wp_send_json(['message' => 'Consent revogado.'], 200);
         } catch (\Exception $e) {
-            $this->handle_exception('consent_revoked', $e->getMessage(), $data->subscription->id ?? null);
+            $this->handle_exception('consent_revoked', $e->getMessage(), $this->consent_subscription($data)->id ?? null);
             return wp_send_json(['message' => 'Erro ao processar consent_revoked.'], 500);
         }
     }
@@ -532,7 +561,7 @@ class VindiWebhooks
     private function charge_rejected($data)
     {
       try {
-            $order = $this->find_order_by_bill_id($data->charge->bill->id);
+            $order = $this->find_order_by_charge_bill($data->charge ?? null);
             if (!empty($order) && $order->get_status() == 'pending') {
                 $order->update_status('failed', __('Pagamento rejeitado!', VINDI));
                 return wp_send_json(['mensagem' => 'O pagamento foi rejeitado com sucesso.'], 200);
@@ -558,6 +587,107 @@ class VindiWebhooks
             $this->find_order_by_subscription_and_cycle($vindi_subscription_id, $cycle);
         }
         $this->handle_exception('charge_rejected', $event->getMessage(), $data->charge->bill->id);
+    }
+
+    /**
+     * Process charge_created event from webhook (Pix Automático: cobrança agendada no banco).
+     * Apenas registra a cobrança no pedido; o pagamento é confirmado pelo bill_paid.
+     * @param $data object
+     */
+    private function charge_created($data)
+    {
+        $charge = $data->charge ?? null;
+        $bill_id = $charge->bill->id ?? null;
+
+        try {
+            $order = $this->find_order_by_charge_bill($charge);
+            $order->add_order_note(sprintf(
+                __('Vindi: cobrança #%s criada e enviada ao banco (fatura #%s, vencimento %s).', VINDI),
+                $charge->id ?? '?',
+                $bill_id ?? '?',
+                $this->format_vindi_date($charge->due_at ?? '')
+            ));
+            return wp_send_json(['message' => 'Cobrança registrada.'], 200);
+        } catch (Exception $e) {
+            // Pedido ainda não existe (ex.: renovação criada depois pelo bill_created): não é erro para a Vindi.
+            $this->handle_exception('charge_created', $e->getMessage(), $bill_id);
+            return wp_send_json(['message' => 'Cobrança recebida sem pedido vinculado.'], 200);
+        }
+    }
+
+    /**
+     * Process charge_updated event from webhook (Pix Automático: cobrança paga ou rejeitada).
+     * Rejeitada (ex.: saldo_insuficiente) marca o pedido como "failed"; paga fica a cargo do bill_paid.
+     * @param $data object
+     */
+    private function charge_updated($data)
+    {
+        $charge = $data->charge ?? null;
+        $status = $charge->status ?? '';
+        $bill_id = $charge->bill->id ?? null;
+        $reason = $charge->last_transaction->gateway_response_code
+            ?? $charge->last_transaction->gateway_message
+            ?? '';
+
+        if ('rejected' !== $status) {
+            return wp_send_json(['message' => sprintf('Status "%s" sem ação.', $status)], 200);
+        }
+
+        try {
+            $order = $this->find_order_by_charge_bill($charge);
+            $note = sprintf(
+                __('Vindi: cobrança #%s rejeitada (fatura #%s). Motivo: %s.', VINDI),
+                $charge->id ?? '?',
+                $bill_id ?? '?',
+                $reason ?: __('não informado', VINDI)
+            );
+
+            if ($order->has_status(array('pending', 'on-hold'))) {
+                $order->update_status('failed', $note);
+            } else {
+                $order->add_order_note($note . ' ' . sprintf(__('Status do pedido mantido (%s).', VINDI), $order->get_status()));
+            }
+            return wp_send_json(['message' => 'Cobrança rejeitada registrada.'], 200);
+        } catch (Exception $e) {
+            $this->handle_exception('charge_updated', $e->getMessage(), $bill_id);
+            return wp_send_json(['message' => 'Erro ao processar charge_updated.'], 422);
+        }
+    }
+
+    /**
+     * Encontra o pedido de uma cobrança: pelo vindi_bill_id (pedido pai) ou, nas renovações,
+     * consultando a fatura na Vindi e buscando por assinatura + ciclo.
+     * @param object|null $charge
+     * @return WC_Order
+     */
+    private function find_order_by_charge_bill($charge)
+    {
+        $bill_id = $charge->bill->id ?? null;
+        if (empty($bill_id)) {
+            throw new Exception(__('Cobrança sem fatura vinculada no webhook.', VINDI), 2);
+        }
+
+        try {
+            return $this->find_order_by_bill_id($bill_id);
+        } catch (Exception $e) {
+            $bill = $this->routes->findBillById($bill_id);
+            $subscription_id = $bill['subscription']['id'] ?? null;
+            $cycle = $bill['period']['cycle'] ?? null;
+            if (empty($subscription_id) || empty($cycle)) {
+                throw $e;
+            }
+            return $this->find_order_by_subscription_and_cycle($subscription_id, $cycle);
+        }
+    }
+
+    /**
+     * @param string $date Data ISO 8601 vinda da Vindi.
+     * @return string
+     */
+    private function format_vindi_date($date)
+    {
+        $timestamp = $date ? strtotime($date) : false;
+        return $timestamp ? wp_date('d/m/Y', $timestamp) : __('não informado', VINDI);
     }
 
   /**
@@ -769,19 +899,14 @@ class VindiWebhooks
    */
     private function find_order_by_subscription_and_cycle($subscription_id, $cycle)
     {
-    $query = $this->query_order_by_metas(array(
-      array(
-        'key' => 'vindi_order',
-        'value' => 'i:' . $subscription_id . ';a:3:{s:5:"cycle";i:' . $cycle . ';',
-        'compare' => 'LIKE'
-      ),
-    ));
+        $order_ids = $this->find_order_ids_by_subscription_and_cycle($subscription_id, $cycle);
 
-        if (false === $query->have_posts()) {
+        if (empty($order_ids)) {
             $msg = sprintf(__('Pedido #%s ciclo #%s não encontrado!', VINDI), $subscription_id, $cycle);
             throw new Exception($msg, 2);
         }
-    return wc_get_order($query->post->ID);
+
+        return wc_get_order($order_ids[0]);
     }
 
   /**
@@ -792,31 +917,58 @@ class VindiWebhooks
    */
     public function subscription_has_order_in_cycle($subscription_id, $cycle)
     {
-    $query = $this->query_order_by_metas(array(
-      array(
-        'key' => 'vindi_order',
-        'value' => 'i:' . $subscription_id . ';a:3:{s:5:"cycle";i:' . $cycle . ';',
-        'compare' => 'LIKE'
-      ),
-    ));
-
-    return $query->have_posts();
+        return !empty($this->find_order_ids_by_subscription_and_cycle($subscription_id, $cycle));
     }
 
-  /**
-   * @param array $metas
-   *
-   * @return WP_Query
-   */
-    private function query_order_by_metas(array $metas)
+    /**
+     * Pedidos (mais antigo primeiro) cujo meta vindi_order tem a assinatura Vindi no ciclo informado.
+     *
+     * Usa wc_get_orders, que funciona com HPOS e com a tabela de posts. A consulta antiga
+     * (WP_Query em shop_order) não enxerga pedidos no HPOS: o bill_created criava renovação
+     * duplicada para o 1º ciclo e o bill_paid não achava o pedido. O LIKE só pré-filtra pela
+     * assinatura; o ciclo é conferido no meta já desserializado.
+     *
+     * @param int $subscription_id
+     * @param int $cycle
+     *
+     * @return int[]
+     */
+    private function find_order_ids_by_subscription_and_cycle($subscription_id, $cycle)
     {
-    $args = array(
-      'post_type' => 'shop_order',
-      'meta_query' => $metas,
-      'post_status' => 'any',
-    );
+        $subscription_id = (int) $subscription_id;
+        if ($subscription_id <= 0 || null === $cycle || '' === $cycle) {
+            return array();
+        }
 
-    return new WP_Query($args);
+        $candidate_ids = wc_get_orders(array(
+            'type'       => 'shop_order',
+            'status'     => array_keys(wc_get_order_statuses()),
+            'limit'      => -1,
+            'return'     => 'ids',
+            'orderby'    => 'date',
+            'order'      => 'ASC',
+            'meta_query' => array(
+                array(
+                    'key'     => 'vindi_order',
+                    'value'   => 'i:' . $subscription_id . ';a:',
+                    'compare' => 'LIKE',
+                ),
+            ),
+        ));
+
+        $order_ids = array();
+        foreach ((array) $candidate_ids as $order_id) {
+            $order = wc_get_order($order_id);
+            $vindi_order = $order ? $order->get_meta('vindi_order', true) : null;
+            if (is_array($vindi_order)
+                && isset($vindi_order[$subscription_id]['cycle'])
+                && (int) $vindi_order[$subscription_id]['cycle'] === (int) $cycle
+            ) {
+                $order_ids[] = (int) $order_id;
+            }
+        }
+
+        return $order_ids;
     }
 
   /**
